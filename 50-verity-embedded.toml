@@ -1,0 +1,9 @@
+[hypervisor.qemu]
+image = "/home/ubuntu/kata-vm-images/kata-ubuntu-noble-confidential-kata-vm-image_7may-verity.image"
+# dm-verity over pmem0p1 (data) and pmem0p2 (hash tree).
+# Kata runtime assembles the dm-verity kernel parameters from this field.
+# IMPORTANT: requires real (non-nested) KVM hardware.
+kernel_verity_params = "root_hash=70052d21a6ad8dc301e157e8b21caf189eec80537347a22c4b6f94dd6d5d9d76,salt=904af2f7eee8ee3f7a383fd3a5c2de6b7cc6c6d2c481807c9cd200fbb41708f0,data_blocks=313344,data_block_size=4096,hash_block_size=4096"
+# Leave kernel_params empty — kata sets root=/dev/dm-0 automatically when
+# kernel_verity_params is non-empty.
+kernel_params = ""
