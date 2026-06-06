@@ -8,34 +8,64 @@
 #   IMAGE_REF  = quay.io/bpradipt/kata-vm-image:7may
 #   OUTPUT_DIR = /home/ubuntu/kata-vm-images
 #
-# Requirements:
-#   - pull_debug binary (image-rs) compiled at PULL_DEBUG path
-#   - mkfs.erofs (erofs-utils), parted, kpartx, rsync, veritysetup
-#   - ~3 GB free disk (erofs + new image)
+# Pinned versions (edit here to bump):
+#   KATA_VERSION    = 3.31.0
+#   GC_BRANCH       = image-cache-0.20.0  (guest-components / CDH + pull_debug)
+#
+# The script builds CDH and pull_debug from source if the binaries are not
+# already present at the expected paths. Set BUILD_BINARIES=always to force
+# a rebuild, or BUILD_BINARIES=never to require pre-built binaries.
+#
+# Requirements (host tools):
+#   git, cargo (rustup), musl-tools, curl, mkfs.erofs, parted, kpartx, rsync, veritysetup
 #
 # dm-verity note:
 #   The resulting image has a proper two-partition layout (p1=rootfs, p2=hash
 #   tree). veritysetup format computes a fresh hash after the rootfs is fully
 #   populated, so kernel_verity_params in the drop-in is always consistent with
-#   the actual data. The kernel verifies the hash at boot — it works the same
-#   in nested and non-nested KVM.
+#   the actual data. The kernel verifies the hash at boot.
 
 set -euo pipefail
+
+# ── pinned versions ────────────────────────────────────────────────────────────
+# Bump these two lines to target a different release combination.
+KATA_VERSION=3.31.0
+GC_BRANCH=image-cache-0.20.0
+
+# SHA256 of the unmodified kata-ubuntu-noble-confidential.image for the pinned
+# kata version. Used to verify the base rootfs before copying it into the new
+# image, ensuring the build is bit-for-bit reproducible regardless of which
+# kata version happens to be installed on the host.
+KATA_IMAGE_SHA256=bec9581734b976ad23a1d9f900f60c91132f7140eb418640cb4e886e4c926fae
 
 # ── configuration ──────────────────────────────────────────────────────────────
 IMAGE_REF="${1:-quay.io/bpradipt/kata-vm-image:7may}"
 OUTPUT_DIR="${2:-/home/ubuntu/kata-vm-images}"
 
-PULL_DEBUG=/home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/pull_debug
-ORIG_IMAGE=/opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image
-CDH_BINARY=/home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub
+# guest-components source — CDH and pull_debug are built from here
+GC_REPO=https://github.com/bpradipt/guest-components.git
+GC_DIR=/opt/guest-components          # clone target
+
+# Where the built binaries land (standard cargo output paths)
+GC_RELEASE=${GC_DIR}/target/x86_64-unknown-linux-musl/release
+CDH_BINARY=${GC_RELEASE}/confidential-data-hub
+PULL_DEBUG=${GC_RELEASE}/pull_debug
+
+# auto = build if binaries are missing; always = always rebuild; never = fail if missing
+BUILD_BINARIES=${BUILD_BINARIES:-auto}
+
+# Versioned cache for the base kata rootfs image — avoids re-downloading on
+# repeated runs and insulates the build from whatever kata is currently installed.
+KATA_IMAGE_CACHE=/opt/kata-images-cache/${KATA_VERSION}
+ORIG_IMAGE=""    # set by ensure_kata_base_image()
+
 WORK_DIR=/run/kata-containers/image
 BLOCK_SIZE=4096   # dm-verity data and hash block size
 GAP_MiB=3         # MBR + alignment gap before first partition
 
 # ── derive filenames ───────────────────────────────────────────────────────────
-# e.g. "quay.io/bpradipt/kata-vm-image:7may" → "kata-vm-image-7may"
-IMAGE_SLUG=$(echo "$IMAGE_REF" | sed 's|.*/||; s|:|_|; s|:|-|')
+# e.g. "quay.io/bpradipt/kata-vm-image:7may" → "kata-vm-image_7may"
+IMAGE_SLUG=$(echo "$IMAGE_REF" | sed 's|.*/||; s|:|_|')
 EROFS_TMP=/tmp/${IMAGE_SLUG}-layers.erofs
 OUTPUT_IMAGE="${OUTPUT_DIR}/kata-ubuntu-noble-confidential-${IMAGE_SLUG}-verity.image"
 CONFIG_FILE=/opt/kata/share/defaults/kata-containers/runtimes/qemu-coco-dev/config.d/50-verity-embedded.toml
@@ -51,18 +81,169 @@ cleanup() {
   [[ -n "$MNT_NEW"  ]] && mountpoint -q "$MNT_NEW"  2>/dev/null && sudo umount "$MNT_NEW"  && rmdir "$MNT_NEW"
   [[ -n "$MNT_ORIG" ]] && mountpoint -q "$MNT_ORIG" 2>/dev/null && sudo umount "$MNT_ORIG" && rmdir "$MNT_ORIG"
   [[ -n "$LOOP_NEW_ATTACHED"  ]] && sudo kpartx -dv "$OUTPUT_IMAGE" 2>/dev/null
-  [[ -n "$LOOP_ORIG_ATTACHED" ]] && sudo kpartx -dv "$ORIG_IMAGE"   2>/dev/null
+  [[ -n "${ORIG_IMAGE:-}"     ]] && [[ -n "$LOOP_ORIG_ATTACHED" ]] && sudo kpartx -dv "$ORIG_IMAGE" 2>/dev/null
 }
 trap cleanup EXIT
 
-# ── preflight checks ───────────────────────────────────────────────────────────
-for bin in mkfs.erofs parted kpartx rsync veritysetup; do
+# ── ensure kata base image (pinned to KATA_VERSION) ───────────────────────────
+ensure_kata_base_image() {
+  local cache_file="${KATA_IMAGE_CACHE}/kata-ubuntu-noble-confidential.image"
+  local installed=/opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image
+
+  _verify_hash() {
+    local file=$1
+    local actual
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    [[ "$actual" == "$KATA_IMAGE_SHA256" ]]
+  }
+
+  # 1. Cached copy already verified?
+  if [[ -f "$cache_file" ]]; then
+    if _verify_hash "$cache_file"; then
+      echo "  Base image: using cached copy ($cache_file)"
+      ORIG_IMAGE="$cache_file"
+      return
+    fi
+    echo "  Cached base image hash mismatch — re-fetching"
+    rm -f "$cache_file"
+  fi
+
+  # 2. Installed kata image matches pinned version?
+  if [[ -f "$installed" ]]; then
+    if _verify_hash "$installed"; then
+      echo "  Installed kata image matches version $KATA_VERSION — caching"
+      mkdir -p "$KATA_IMAGE_CACHE"
+      cp "$installed" "$cache_file"
+      ORIG_IMAGE="$cache_file"
+      return
+    fi
+    local actual_hash
+    actual_hash=$(sha256sum "$installed" | awk '{print $1}')
+    echo "  WARNING: installed kata image does not match $KATA_VERSION"
+    echo "    Expected: $KATA_IMAGE_SHA256"
+    echo "    Got:      $actual_hash"
+    echo "  Downloading correct version from GitHub releases..."
+  else
+    echo "  kata base image not found at $installed — downloading from GitHub..."
+  fi
+
+  # 3. Download from GitHub releases and extract just the base image.
+  local tarball="/tmp/kata-static-${KATA_VERSION}-amd64.tar.zst"
+  local url="https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.zst"
+
+  if [[ ! -f "$tarball" ]]; then
+    echo "  Downloading $url ..."
+    curl -fL --progress-bar -o "$tarball" "$url"
+  else
+    echo "  Using cached tarball: $tarball"
+  fi
+
+  echo "  Extracting base image from tarball..."
+  local tmp
+  tmp=$(mktemp -d)
+  tar --zstd -xf "$tarball" \
+    -C "$tmp" \
+    ./opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image
+
+  mkdir -p "$KATA_IMAGE_CACHE"
+  mv "$tmp/opt/kata/share/kata-containers/kata-ubuntu-noble-confidential.image" "$cache_file"
+  rm -rf "$tmp"
+
+  if ! _verify_hash "$cache_file"; then
+    local actual_hash
+    actual_hash=$(sha256sum "$cache_file" | awk '{print $1}')
+    echo "ERROR: downloaded base image SHA256 mismatch"
+    echo "  Expected: $KATA_IMAGE_SHA256"
+    echo "  Got:      $actual_hash"
+    rm -f "$cache_file"
+    exit 1
+  fi
+
+  echo "  Base image verified: $cache_file"
+  ORIG_IMAGE="$cache_file"
+}
+
+# ── build CDH and pull_debug from source ──────────────────────────────────────
+build_binaries() {
+  echo "=== Building CDH and pull_debug from source ==="
+  echo "  Repo:   $GC_REPO"
+  echo "  Branch: $GC_BRANCH"
+  echo "  Dir:    $GC_DIR"
+
+  command -v cargo > /dev/null || { echo "ERROR: cargo not found — install Rust (https://rustup.rs)"; exit 1; }
+  command -v git   > /dev/null || { echo "ERROR: git not found"; exit 1; }
+
+  # Ensure the musl target is installed
+  rustup target add x86_64-unknown-linux-musl
+
+  # Clone or update
+  if [[ -d "$GC_DIR/.git" ]]; then
+    echo "  Updating existing clone at $GC_DIR ..."
+    git -C "$GC_DIR" fetch origin
+    git -C "$GC_DIR" checkout "$GC_BRANCH"
+    git -C "$GC_DIR" pull origin "$GC_BRANCH"
+  else
+    echo "  Cloning $GC_REPO ($GC_BRANCH) ..."
+    git clone --branch "$GC_BRANCH" --depth 1 "$GC_REPO" "$GC_DIR"
+  fi
+
+  # Build confidential-data-hub
+  # The Makefile builds --bin ttrpc-cdh with musl, then renames it to
+  # confidential-data-hub under target/x86_64-unknown-linux-musl/release/.
+  echo ""
+  echo "  Building confidential-data-hub (musl static) ..."
+  make -C "$GC_DIR/confidential-data-hub" \
+    LIBC=musl \
+    RESOURCE_PROVIDER=kbs,sev \
+    KMS_PROVIDER=aliyun \
+    RPC=ttrpc
+
+  # Build pull_debug (in the image-rs workspace member)
+  # Features: pull-debug-bin enables the binary; oci-client-rustls and
+  # signature-cosign-rustls provide TLS without openssl system dependency.
+  echo ""
+  echo "  Building pull_debug (musl static) ..."
+  cargo build --release \
+    --manifest-path "$GC_DIR/image-rs/Cargo.toml" \
+    --bin pull_debug \
+    --target x86_64-unknown-linux-musl \
+    --no-default-features \
+    --features pull-debug-bin,oci-client-rustls,signature-cosign-rustls
+
+  echo ""
+  echo "  Built:"
+  ls -lh "$CDH_BINARY" "$PULL_DEBUG"
+}
+
+# ── decide whether to build ────────────────────────────────────────────────────
+case "$BUILD_BINARIES" in
+  always)
+    build_binaries
+    ;;
+  never)
+    [[ -f "$CDH_BINARY"  ]] || { echo "ERROR: CDH binary not found at $CDH_BINARY (BUILD_BINARIES=never)"; exit 1; }
+    [[ -f "$PULL_DEBUG"  ]] || { echo "ERROR: pull_debug not found at $PULL_DEBUG (BUILD_BINARIES=never)"; exit 1; }
+    ;;
+  auto|*)
+    if [[ ! -f "$CDH_BINARY" || ! -f "$PULL_DEBUG" ]]; then
+      echo "  Binaries not found — building from source (set BUILD_BINARIES=never to skip)."
+      build_binaries
+    else
+      echo "  Using existing binaries (set BUILD_BINARIES=always to force rebuild):"
+      ls -lh "$CDH_BINARY" "$PULL_DEBUG"
+    fi
+    ;;
+esac
+
+# ── preflight checks (host tools) ─────────────────────────────────────────────
+for bin in mkfs.erofs parted kpartx rsync veritysetup curl; do
   command -v $bin > /dev/null || { echo "ERROR: $bin not found"; exit 1; }
 done
-[[ -f "$PULL_DEBUG"  ]] || { echo "ERROR: pull_debug not found at $PULL_DEBUG"; exit 1; }
-[[ -f "$CDH_BINARY"  ]] || { echo "ERROR: CDH binary not found at $CDH_BINARY"; exit 1; }
-[[ -f "$ORIG_IMAGE"  ]] || { echo "ERROR: original kata image not found: $ORIG_IMAGE"; exit 1; }
 
+echo "=== Ensuring kata $KATA_VERSION base image ==="
+ensure_kata_base_image
+
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Building kata VM image with dm-verity + embedded container"
 echo "  Image ref:  $IMAGE_REF"
@@ -286,9 +467,6 @@ echo "    root_hash=${ROOT_HASH}"
 echo "    salt=${SALT}"
 echo "    data_blocks=${ACTUAL_DATA_BLOCKS}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Verify the config drop-in is active:"
-echo "  cat $CONFIG_FILE"
 echo ""
 echo "NOTE: dm-verity is active. The hash was computed against the final rootfs"
 echo "and will verify correctly. Boot will panic if the image is tampered with"
