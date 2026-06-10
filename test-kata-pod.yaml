@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-test
+  namespace: default
+spec:
+  runtimeClassName: kata-qemu-coco-dev
+  containers:
+  - args:
+    - sleep
+    - "360000"
+    image: quay.io/bpradipt/kata-vm-image:7may
+    # IfNotPresent: kubelet uses cached node image (avoids node-side pull being
+    # blocked), so the only variable is whether in-VM CDH can reach the registry.
+    imagePullPolicy: IfNotPresent
+    name: pod-test

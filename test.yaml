@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-7may
+  annotations:
+    io.katacontainers.config.hypervisor.image: "/opt/kata/share/kata-containers/kata-containers-confidential.img"
+    io.containerd.cri.runtime-handler: kata-qemu-coco-dev
+  namespace: default
+spec:
+  runtimeClassName: kata-qemu-coco-dev
+  containers:
+  - args:
+    - sleep
+    - "360000"
+    image: quay.io/bpradipt/kata-vm-image:7may
+    imagePullPolicy: IfNotPresent
+    name: pod-7may

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-test
+  namespace: default
+spec:
+  containers:
+  - args:
+    - sleep
+    - "360000"
+    image: quay.io/bpradipt/kata-vm-image:7may
+    imagePullPolicy: Always
+    name: pod-test
