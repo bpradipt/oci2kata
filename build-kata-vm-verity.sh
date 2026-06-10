@@ -256,6 +256,11 @@ if sudo test -d "$WORK_DIR/layers" && sudo test -f "$WORK_DIR/meta_store.json"; 
   echo "  Layers already present at $WORK_DIR — skipping pull."
   echo "  (Delete $WORK_DIR to force re-pull)"
 else
+  # Unmount any stale overlay/bind mounts left under WORK_DIR before wiping,
+  # so the directory is fully clean and layer indices start at 0.
+  sudo findmnt --raw --noheadings -o TARGET | grep "^${WORK_DIR}" | sort -r | \
+    xargs -r -I{} sudo umount {} 2>/dev/null || true
+  sudo rm -rf "$WORK_DIR"
   sudo mkdir -p "$WORK_DIR"
   # Write a minimal CDH config: offline_fs_kbc avoids any network KBS call,
   # and work_dir must match WORK_DIR so layers and meta_store.json land where
@@ -270,7 +275,7 @@ url = ""
 work_dir = "${WORK_DIR}"
 CDHEOF
   BUNDLE_DIR=/tmp/pull-bundle-${IMAGE_SLUG}
-  sudo mkdir -p "$BUNDLE_DIR"
+  sudo rm -rf "$BUNDLE_DIR" && sudo mkdir -p "$BUNDLE_DIR"
   sudo env RUST_LOG=info "$CDH_ONESHOT" --config "$CDH_BUILD_CONFIG" pull-image \
     --image-url "$IMAGE_REF" \
     --bundle-path "$BUNDLE_DIR"
@@ -392,12 +397,11 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c '\
   set -e; \
-  mkdir -p /run/kata-layers-erofs /run/kata-layers-upper /run/kata-layers-work && \
+  mkdir -p /run/kata-layers-erofs && \
   mount -t erofs -o loop /opt/kata-cache/layers.erofs /run/kata-layers-erofs && \
   mkdir -p /run/kata-containers/image/layers /run/kata-containers/image/overlay && \
-  mount -t overlay overlay \
-    -o lowerdir=/run/kata-layers-erofs,upperdir=/run/kata-layers-upper,workdir=/run/kata-layers-work \
-    /run/kata-containers/image/layers && \
+  tar -c -C /run/kata-layers-erofs . | tar -x -C /run/kata-containers/image/layers && \
+  umount /run/kata-layers-erofs && \
   cp /opt/kata-cache/meta_store.json /run/kata-containers/image/meta_store.json && \
   mount --bind /run/kata-containers/image/meta_store.json \
                /run/kata-containers/image/meta_store.json'
