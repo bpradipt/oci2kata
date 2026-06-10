@@ -10,9 +10,9 @@
 #
 # Pinned versions (edit here to bump):
 #   KATA_VERSION    = 3.31.0
-#   GC_BRANCH       = image-cache-0.20.0  (guest-components / CDH + pull_debug)
+#   GC_BRANCH       = image-cache-0.20.0  (guest-components / CDH + cdh-oneshot)
 #
-# The script builds CDH and pull_debug from source if the binaries are not
+# The script builds CDH and cdh-oneshot from source if the binaries are not
 # already present at the expected paths. Set BUILD_BINARIES=always to force
 # a rebuild, or BUILD_BINARIES=never to require pre-built binaries.
 #
@@ -42,14 +42,14 @@ KATA_IMAGE_SHA256=bec9581734b976ad23a1d9f900f60c91132f7140eb418640cb4e886e4c926f
 IMAGE_REF="${1:-quay.io/bpradipt/kata-vm-image:7may}"
 OUTPUT_DIR="${2:-/home/ubuntu/kata-vm-images}"
 
-# guest-components source — CDH and pull_debug are built from here
+# guest-components source — CDH and cdh-oneshot are built from here
 GC_REPO=https://github.com/bpradipt/guest-components.git
 GC_DIR=/opt/guest-components          # clone target
 
 # Where the built binaries land (standard cargo output paths)
 GC_RELEASE=${GC_DIR}/target/x86_64-unknown-linux-musl/release
 CDH_BINARY=${GC_RELEASE}/confidential-data-hub
-PULL_DEBUG=${GC_RELEASE}/pull_debug
+CDH_ONESHOT=${GC_RELEASE}/cdh-oneshot
 
 # auto = build if binaries are missing; always = always rebuild; never = fail if missing
 BUILD_BINARIES=${BUILD_BINARIES:-auto}
@@ -163,9 +163,9 @@ ensure_kata_base_image() {
   ORIG_IMAGE="$cache_file"
 }
 
-# ── build CDH and pull_debug from source ──────────────────────────────────────
+# ── build CDH and cdh-oneshot from source ─────────────────────────────────────
 build_binaries() {
-  echo "=== Building CDH and pull_debug from source ==="
+  echo "=== Building CDH and cdh-oneshot from source ==="
   echo "  Repo:   $GC_REPO"
   echo "  Branch: $GC_BRANCH"
   echo "  Dir:    $GC_DIR"
@@ -198,21 +198,20 @@ build_binaries() {
     KMS_PROVIDER=aliyun \
     RPC=ttrpc
 
-  # Build pull_debug (in the image-rs workspace member)
-  # Features: pull-debug-bin enables the binary; oci-client-rustls and
-  # signature-cosign-rustls provide TLS without openssl system dependency.
+  # Build cdh-oneshot — CDH's one-shot CLI used for build-time pre-pull.
+  # ONE_SHOT=true selects --bin cdh-oneshot with only the "bin" feature
+  # (no ttrpc/grpc), so no AA socket is required when running on the host.
   echo ""
-  echo "  Building pull_debug (musl static) ..."
-  cargo build --release \
-    --manifest-path "$GC_DIR/image-rs/Cargo.toml" \
-    --bin pull_debug \
-    --target x86_64-unknown-linux-musl \
-    --no-default-features \
-    --features pull-debug-bin,oci-client-rustls,signature-cosign-rustls
+  echo "  Building cdh-oneshot (musl static) ..."
+  make -C "$GC_DIR/confidential-data-hub" \
+    LIBC=musl \
+    RESOURCE_PROVIDER=kbs,sev \
+    KMS_PROVIDER=aliyun \
+    ONE_SHOT=true
 
   echo ""
   echo "  Built:"
-  ls -lh "$CDH_BINARY" "$PULL_DEBUG"
+  ls -lh "$CDH_BINARY" "$CDH_ONESHOT"
 }
 
 # ── decide whether to build ────────────────────────────────────────────────────
@@ -221,16 +220,16 @@ case "$BUILD_BINARIES" in
     build_binaries
     ;;
   never)
-    [[ -f "$CDH_BINARY"  ]] || { echo "ERROR: CDH binary not found at $CDH_BINARY (BUILD_BINARIES=never)"; exit 1; }
-    [[ -f "$PULL_DEBUG"  ]] || { echo "ERROR: pull_debug not found at $PULL_DEBUG (BUILD_BINARIES=never)"; exit 1; }
+    [[ -f "$CDH_BINARY"   ]] || { echo "ERROR: CDH binary not found at $CDH_BINARY (BUILD_BINARIES=never)"; exit 1; }
+    [[ -f "$CDH_ONESHOT"  ]] || { echo "ERROR: cdh-oneshot not found at $CDH_ONESHOT (BUILD_BINARIES=never)"; exit 1; }
     ;;
   auto|*)
-    if [[ ! -f "$CDH_BINARY" || ! -f "$PULL_DEBUG" ]]; then
+    if [[ ! -f "$CDH_BINARY" || ! -f "$CDH_ONESHOT" ]]; then
       echo "  Binaries not found — building from source (set BUILD_BINARIES=never to skip)."
       build_binaries
     else
       echo "  Using existing binaries (set BUILD_BINARIES=always to force rebuild):"
-      ls -lh "$CDH_BINARY" "$PULL_DEBUG"
+      ls -lh "$CDH_BINARY" "$CDH_ONESHOT"
     fi
     ;;
 esac
@@ -258,10 +257,53 @@ if sudo test -d "$WORK_DIR/layers" && sudo test -f "$WORK_DIR/meta_store.json"; 
   echo "  (Delete $WORK_DIR to force re-pull)"
 else
   sudo mkdir -p "$WORK_DIR"
-  sudo "$PULL_DEBUG" \
-    --image "$IMAGE_REF" \
-    --work-dir "$WORK_DIR" \
-    --bundle-dir /tmp/pull-bundle-${IMAGE_SLUG}
+  # Write a minimal CDH config: offline_fs_kbc avoids any network KBS call,
+  # and work_dir must match WORK_DIR so layers and meta_store.json land where
+  # the erofs packaging step expects them.
+  CDH_BUILD_CONFIG=$(mktemp /tmp/cdh-build-XXXXXX.toml)
+  cat > "$CDH_BUILD_CONFIG" << CDHEOF
+[kbc]
+name = "offline_fs_kbc"
+url = ""
+
+[image]
+work_dir = "${WORK_DIR}"
+CDHEOF
+  BUNDLE_DIR=/tmp/pull-bundle-${IMAGE_SLUG}
+  sudo mkdir -p "$BUNDLE_DIR"
+  sudo env RUST_LOG=info "$CDH_ONESHOT" --config "$CDH_BUILD_CONFIG" pull-image \
+    --image-url "$IMAGE_REF" \
+    --bundle-path "$BUNDLE_DIR"
+  rm -f "$CDH_BUILD_CONFIG"
+
+  # Add the manifest-digest form of the image reference to reference_db.
+  # kata-agent may resolve the tag to a digest before calling CDH, so CDH
+  # needs both "image:tag" and "image@sha256:..." in reference_db to hit
+  # the fast path without falling through to a registry pull.
+  IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
+  sudo python3 - "$WORK_DIR/meta_store.json" "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
+import json, sys
+path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    meta = json.load(f)
+config_hash = meta.get("reference_db", {}).get(tag_ref)
+if not config_hash:
+    print(f"  WARN: {tag_ref} not found in reference_db — skipping digest injection")
+    sys.exit(0)
+# The manifest digest lives in image_db[config_hash].digest
+manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
+if not manifest_digest:
+    print(f"  WARN: manifest digest not found in image_db — skipping digest injection")
+    sys.exit(0)
+digest_ref = f"{repo}@{manifest_digest}"
+if digest_ref not in meta["reference_db"]:
+    meta["reference_db"][digest_ref] = config_hash
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Added digest ref to reference_db: {digest_ref}")
+else:
+    print(f"  Digest ref already present: {digest_ref}")
+PYEOF
 fi
 echo "  Layers: $(sudo du -sh $WORK_DIR/layers 2>/dev/null | cut -f1)"
 
@@ -385,7 +427,9 @@ ExecStart=/bin/bash -c '\
   mount -t overlay overlay \
     -o lowerdir=/run/kata-layers-erofs,upperdir=/run/kata-layers-upper,workdir=/run/kata-layers-work \
     /run/kata-containers/image/layers && \
-  cp /opt/kata-cache/meta_store.json /run/kata-containers/image/meta_store.json'
+  cp /opt/kata-cache/meta_store.json /run/kata-containers/image/meta_store.json && \
+  mount --bind /run/kata-containers/image/meta_store.json \
+               /run/kata-containers/image/meta_store.json'
 
 [Install]
 WantedBy=kata-containers.target
