@@ -10,8 +10,8 @@ serves it from local cache without any registry contact inside the VM.
 - Kata containers 3.31.0 installed via helm (kata-deploy)
 - Modified guest-components with image-rs caching patches:
   - Repo: `https://github.com/bpradipt/guest-components` branch `local-0.20.0`
-  - Binary: `/home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub`
-  - `pull_debug` tool: `/home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/pull_debug`
+  - Binary: `/opt/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub`
+  - `cdh-oneshot` tool: `/opt/guest-components/target/x86_64-unknown-linux-musl/release/cdh-oneshot`
 - Tools: `kpartx`, `mkfs.erofs` (erofs-utils), `rsync`, `parted`
 
 ---
@@ -21,14 +21,48 @@ serves it from local cache without any registry contact inside the VM.
 ### 1. Pre-pull the container image
 
 Pull into `/run/kata-containers/image/` so layer paths in `meta_store.json` match
-what CDH uses at runtime.
+what CDH uses at runtime. `cdh-oneshot` uses CDH's own image-rs code path, so the
+layer store format is guaranteed to match what CDH expects at runtime.
 
 ```bash
+CDH_ONESHOT=/opt/guest-components/target/x86_64-unknown-linux-musl/release/cdh-oneshot
+IMAGE_REF=<IMAGE_REFERENCE>
+
 sudo mkdir -p /run/kata-containers/image
-sudo pull_debug \
-  --image <IMAGE_REFERENCE> \
-  --work-dir /run/kata-containers/image \
-  --bundle-dir /tmp/pull-bundle
+
+# Write a minimal CDH config: offline_fs_kbc avoids any network KBS call
+cat > /tmp/cdh-build.toml << EOF
+[kbc]
+name = "offline_fs_kbc"
+url = ""
+
+[image]
+work_dir = "/run/kata-containers/image"
+EOF
+
+sudo env RUST_LOG=info "$CDH_ONESHOT" --config /tmp/cdh-build.toml pull-image \
+  --image-url "$IMAGE_REF" \
+  --bundle-path /tmp/pull-bundle
+rm -f /tmp/cdh-build.toml
+
+# Add the manifest-digest form of the reference to reference_db.
+# kata-agent resolves the tag to a digest before calling CDH, so both
+# "image:tag" and "image@sha256:..." must be present for the cache hit.
+IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
+sudo python3 - /run/kata-containers/image/meta_store.json "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
+import json, sys
+path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    meta = json.load(f)
+config_hash = meta.get("reference_db", {}).get(tag_ref)
+manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
+digest_ref = f"{repo}@{manifest_digest}"
+if digest_ref not in meta["reference_db"]:
+    meta["reference_db"][digest_ref] = config_hash
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"Added digest ref: {digest_ref}")
+PYEOF
 ```
 
 Check layer size:
@@ -95,7 +129,7 @@ sudo rsync -a /mnt/kata-orig/ /mnt/kata-new/
 
 ```bash
 sudo cp \
-  /home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub \
+  /opt/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub \
   /mnt/kata-new/usr/local/bin/confidential-data-hub
 ```
 
@@ -129,7 +163,9 @@ ExecStart=/bin/bash -c '\
   mount -t overlay overlay \
     -o lowerdir=/run/kata-layers-erofs,upperdir=/run/kata-layers-upper,workdir=/run/kata-layers-work \
     /run/kata-containers/image/layers && \
-  cp /opt/kata-cache/meta_store.json /run/kata-containers/image/meta_store.json'
+  cp /opt/kata-cache/meta_store.json /run/kata-containers/image/meta_store.json && \
+  mount --bind /run/kata-containers/image/meta_store.json \
+               /run/kata-containers/image/meta_store.json'
 
 [Install]
 WantedBy=kata-containers.target
@@ -228,7 +264,7 @@ sudo ./build-kata-vm-verity.sh quay.io/bpradipt/kata-vm-image:7may
 ```
 
 The script:
-1. Pre-pulls the container image via `pull_debug` (skips if layers exist at `/run/kata-containers/image/`)
+1. Pre-pulls the container image via `cdh-oneshot pull-image` (skips if layers exist at `/run/kata-containers/image/`), then injects the manifest-digest form of the reference into `reference_db`
 2. Creates an erofs image of the layers (lz4 + dedup)
 3. Calculates partition sizes (rootfs + hash tree + 2-MiB alignment)
 4. Creates a fresh raw image file with `dd if=/dev/zero`
@@ -244,12 +280,41 @@ If you need to run steps individually:
 #### 1. Pre-pull the container image
 
 ```bash
-PULL_DEBUG=/home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/pull_debug
+CDH_ONESHOT=/opt/guest-components/target/x86_64-unknown-linux-musl/release/cdh-oneshot
+IMAGE_REF=quay.io/bpradipt/kata-vm-image:7may
+
 sudo mkdir -p /run/kata-containers/image
-sudo $PULL_DEBUG \
-  --image quay.io/bpradipt/kata-vm-image:7may \
-  --work-dir /run/kata-containers/image \
-  --bundle-dir /tmp/pull-bundle
+
+cat > /tmp/cdh-build.toml << EOF
+[kbc]
+name = "offline_fs_kbc"
+url = ""
+
+[image]
+work_dir = "/run/kata-containers/image"
+EOF
+
+sudo env RUST_LOG=info "$CDH_ONESHOT" --config /tmp/cdh-build.toml pull-image \
+  --image-url "$IMAGE_REF" \
+  --bundle-path /tmp/pull-bundle
+rm -f /tmp/cdh-build.toml
+
+# Inject digest form into reference_db (kata-agent resolves tag → digest)
+IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
+sudo python3 - /run/kata-containers/image/meta_store.json "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
+import json, sys
+path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    meta = json.load(f)
+config_hash = meta.get("reference_db", {}).get(tag_ref)
+manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
+digest_ref = f"{repo}@{manifest_digest}"
+if digest_ref not in meta["reference_db"]:
+    meta["reference_db"][digest_ref] = config_hash
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"Added digest ref: {digest_ref}")
+PYEOF
 
 sudo du -sh /run/kata-containers/image/layers
 ```
@@ -313,7 +378,7 @@ sudo mount /dev/mapper/${LOOP_NEW}p1 /mnt/kata-new
 sudo rsync -a /mnt/kata-orig/ /mnt/kata-new/
 
 # CDH binary
-sudo cp /home/ubuntu/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub \
+sudo cp /opt/guest-components/target/x86_64-unknown-linux-musl/release/confidential-data-hub \
   /mnt/kata-new/usr/local/bin/confidential-data-hub
 
 # Image cache
