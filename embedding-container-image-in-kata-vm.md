@@ -44,26 +44,11 @@ sudo env RUST_LOG=info "$CDH_ONESHOT" --config /tmp/cdh-build.toml pull-image \
   --image-url "$IMAGE_REF" \
   --bundle-path /tmp/pull-bundle
 rm -f /tmp/cdh-build.toml
-
-# Add the manifest-digest form of the reference to reference_db.
-# kata-agent resolves the tag to a digest before calling CDH, so both
-# "image:tag" and "image@sha256:..." must be present for the cache hit.
-IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
-sudo python3 - /run/kata-containers/image/meta_store.json "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
-import json, sys
-path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    meta = json.load(f)
-config_hash = meta.get("reference_db", {}).get(tag_ref)
-manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
-digest_ref = f"{repo}@{manifest_digest}"
-if digest_ref not in meta["reference_db"]:
-    meta["reference_db"][digest_ref] = config_hash
-    with open(path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"Added digest ref: {digest_ref}")
-PYEOF
 ```
+
+`cdh-oneshot` writes both the tag form and the manifest-digest form
+(`image@sha256:...`) into `reference_db` automatically, so no post-processing
+is needed.
 
 Check layer size:
 ```bash
@@ -298,23 +283,6 @@ sudo env RUST_LOG=info "$CDH_ONESHOT" --config /tmp/cdh-build.toml pull-image \
   --image-url "$IMAGE_REF" \
   --bundle-path /tmp/pull-bundle
 rm -f /tmp/cdh-build.toml
-
-# Inject digest form into reference_db (kata-agent resolves tag → digest)
-IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
-sudo python3 - /run/kata-containers/image/meta_store.json "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
-import json, sys
-path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    meta = json.load(f)
-config_hash = meta.get("reference_db", {}).get(tag_ref)
-manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
-digest_ref = f"{repo}@{manifest_digest}"
-if digest_ref not in meta["reference_db"]:
-    meta["reference_db"][digest_ref] = config_hash
-    with open(path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"Added digest ref: {digest_ref}")
-PYEOF
 
 sudo du -sh /run/kata-containers/image/layers
 ```

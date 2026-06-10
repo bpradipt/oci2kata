@@ -275,35 +275,6 @@ CDHEOF
     --image-url "$IMAGE_REF" \
     --bundle-path "$BUNDLE_DIR"
   rm -f "$CDH_BUILD_CONFIG"
-
-  # Add the manifest-digest form of the image reference to reference_db.
-  # kata-agent may resolve the tag to a digest before calling CDH, so CDH
-  # needs both "image:tag" and "image@sha256:..." in reference_db to hit
-  # the fast path without falling through to a registry pull.
-  IMAGE_REPO=$(echo "$IMAGE_REF" | sed 's/:.*//')
-  sudo python3 - "$WORK_DIR/meta_store.json" "$IMAGE_REF" "$IMAGE_REPO" << 'PYEOF'
-import json, sys
-path, tag_ref, repo = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    meta = json.load(f)
-config_hash = meta.get("reference_db", {}).get(tag_ref)
-if not config_hash:
-    print(f"  WARN: {tag_ref} not found in reference_db — skipping digest injection")
-    sys.exit(0)
-# The manifest digest lives in image_db[config_hash].digest
-manifest_digest = meta.get("image_db", {}).get(config_hash, {}).get("digest")
-if not manifest_digest:
-    print(f"  WARN: manifest digest not found in image_db — skipping digest injection")
-    sys.exit(0)
-digest_ref = f"{repo}@{manifest_digest}"
-if digest_ref not in meta["reference_db"]:
-    meta["reference_db"][digest_ref] = config_hash
-    with open(path, "w") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Added digest ref to reference_db: {digest_ref}")
-else:
-    print(f"  Digest ref already present: {digest_ref}")
-PYEOF
 fi
 echo "  Layers: $(sudo du -sh $WORK_DIR/layers 2>/dev/null | cut -f1)"
 
