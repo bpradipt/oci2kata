@@ -305,8 +305,9 @@ echo "=== Step 3: Calculating partition sizes ==="
 CONTENT_MiB=$(( 215 + 35 + EROFS_MiB + 100 ))
 P1_MiB=$(( ((CONTENT_MiB * 115 / 100) + 3) / 4 * 4 ))
 
-# dm-verity hash tree size for SHA-256 with 4096-byte blocks:
-#   128 hashes per block → levels until 1 block remains.
+# dm-verity hash tree for SHA-256, 4096-byte blocks, 128 hashes per block.
+# Kata's dm-mod.create format uses /dev/pmem0p1 as data and /dev/pmem0p2 as
+# hash device with hash_start=0, so the hash tree must be on a separate p2.
 DATA_BLOCKS=$(( P1_MiB * 1024 * 1024 / BLOCK_SIZE ))
 L0=$(( (DATA_BLOCKS + 127) / 128 ))
 L1=$(( (L0 + 127) / 128 ))
@@ -436,12 +437,17 @@ LOOP_ORIG_ATTACHED=""
 # ── step 9: compute dm-verity hash tree ───────────────────────────────────────
 echo ""
 echo "=== Step 9: Compute dm-verity hash tree ==="
-# veritysetup format writes the superblock + Merkle tree to DEV_P2 and prints
-# the root hash, salt, and data block count to stdout.
+# Two-partition layout: kata's dm-mod.create format hardcodes hash_start=0,
+# meaning it expects the hash tree at block 0 of /dev/pmem0p2.
+# --no-superblock omits the veritysetup 512-byte header so the Merkle tree
+# starts at block 0 of p2, matching kata's expectation exactly.
+# Without --no-superblock the superblock occupies block 0 and the kernel
+# reports "metadata block 0 is corrupted" and panics.
 VERITY_OUTPUT=$(sudo veritysetup format \
   --data-block-size=$BLOCK_SIZE \
   --hash-block-size=$BLOCK_SIZE \
   --hash=sha256 \
+  --no-superblock \
   "$DEV_P1" "$DEV_P2" 2>&1)
 echo "$VERITY_OUTPUT"
 
@@ -463,13 +469,12 @@ echo "=== Step 11: Write kata config drop-in ==="
 sudo tee "$CONFIG_FILE" > /dev/null << EOF
 [hypervisor.qemu]
 image = "${OUTPUT_IMAGE}"
-# dm-verity over pmem0p1 (data) and pmem0p2 (hash tree).
-# Kata runtime assembles the dm-verity kernel parameters from this field.
-# Hash was computed by veritysetup format after rootfs was finalised.
+# Two-partition dm-verity: p1=rootfs data, p2=hash tree (hash_start=0 on p2).
+# Kata generates dm-mod.create with /dev/pmem0p1 as data and /dev/pmem0p2 as
+# hash device, then sets root=/dev/dm-0 automatically.
 kernel_verity_params = "root_hash=${ROOT_HASH},salt=${SALT},data_blocks=${ACTUAL_DATA_BLOCKS},data_block_size=${BLOCK_SIZE},hash_block_size=${BLOCK_SIZE}"
-# Leave kernel_params empty — kata sets root=/dev/dm-0 automatically when
-# kernel_verity_params is non-empty.
-kernel_params = ""
+# Only CDH params here; root/rootflags/rootfstype are managed by kata for dm-verity.
+kernel_params = "agent.aa_kbc_params=offline_fs_kbc::"
 EOF
 
 echo "  Written: $CONFIG_FILE"
@@ -487,6 +492,6 @@ echo "    salt=${SALT}"
 echo "    data_blocks=${ACTUAL_DATA_BLOCKS}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "NOTE: dm-verity is active. The hash was computed against the final rootfs"
-echo "and will verify correctly. Boot will panic if the image is tampered with"
-echo "after this point — that is the intended behaviour."
+echo "dm-verity active (two-partition: p1=data, p2=hash)."
+echo "Kata sets root=/dev/dm-0 automatically from kernel_verity_params."
+echo "Boot will panic if the image is tampered with after this point."
