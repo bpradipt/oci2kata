@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: embedded-image-test
+  namespace: default
+spec:
+  runtimeClassName: kata-remote
+  containers:
+  - name: test
+    image: quay.io/bpradipt/kata-vm-image:7may
+    # IfNotPresent: kubelet uses the node-cached image, so the only variable is
+    # whether in-VM CDH can serve the image from the embedded cache.
+    imagePullPolicy: IfNotPresent
+    args: ["sleep", "3600"]
+    resources:
+      requests:
+        memory: "4Gi"
+      limits:
+        memory: "4Gi"
+  restartPolicy: Never

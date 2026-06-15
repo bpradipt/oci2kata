@@ -1,5 +1,8 @@
 # Embedding Container Image in Kata VM — Investigation Findings
 
+> **See also:** [CAA experiments](experiments-caa.md) — the same four-case
+> validation adapted for Cloud API Adaptor (`kata-remote` runtime class).
+
 ## Overview
 
 This document captures all findings from investigating whether a container image

@@ -3,6 +3,10 @@
 Embed a container image into the Kata VM disk image so CDH (Confidential Data Hub)
 serves it from local cache without any registry contact inside the VM.
 
+> **See also:** [CAA peer pod approach](embedding-container-image-in-caa.md) —
+> the same technique adapted for Cloud API Adaptor (mkosi-built qcow2,
+> `kata-remote` runtime class).
+
 ---
 
 ## Prerequisites
