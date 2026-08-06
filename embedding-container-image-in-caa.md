@@ -208,6 +208,129 @@ build/podvm-ubuntu-amd64-embedded.qcow2  (1.8 GB compressed qcow2)
 
 ---
 
+## Embedding Multiple Images
+
+Multiple container images can be embedded into a single `layers.erofs` archive
+with automatic cross-image layer deduplication.  The erofs archive and
+`meta_store.json` are produced by a sequential pull loop that feeds all images
+into the **same `work_dir`** before the single `mkfs.erofs` call.
+
+### Why deduplication is free
+
+`image-rs` deduplicates at the `layer_db` level inside `MetaStore`.  In
+`pull.rs`, before writing any new layer directory, it checks:
+
+```rust
+if let Some(layer_meta) = ms.read().await.layer_db.get(&layer.digest) {
+    return Ok(layer_meta.clone());  // reuses existing store_path integer
+}
+```
+
+Pulling Image B into the same `work_dir` as Image A returns the **existing**
+integer directory for any layer whose digest is already in `layer_db` — nothing
+is written twice.  After all pulls, `meta_store.json` contains every image in
+`image_db` and `reference_db`, and every unique layer exactly once in `layer_db`.
+No manual merge step, no external digest registry file.
+
+### The pull loop pattern
+
+Replace the single `cdh-oneshot pull-image` call in Stage 2 with a loop.  The
+**`work_dir` is shared** across all iterations; the **`bundle-path` is
+per-image** — `cdh-oneshot` writes `config.json` into `bundle-path` on every
+invocation and fails with `"OCI config file already exists"` if the same
+directory is reused for a second image.
+
+```bash
+# One CDH config — work_dir shared across all pulls so layer_db dedup applies.
+CDH_CONFIG=$(mktemp /tmp/cdh-build-XXXXXX.toml)
+WORK_DIR=$(mktemp -d)
+mkdir -p "$WORK_DIR/image"
+
+cat > "$CDH_CONFIG" << EOF
+[kbc]
+name = "offline_fs_kbc"
+url = ""
+
+[image]
+work_dir = "${WORK_DIR}/image"
+max_concurrent_layer_downloads_per_image = 8
+EOF
+
+# EMBEDDED_IMAGES is a space-separated list of OCI image refs.
+# Each pull extends layer_db and image_db in-place; shared layers are reused.
+for img in $EMBEDDED_IMAGES; do
+    BUNDLE_DIR=$(mktemp -d)         # fresh dir per image — mandatory
+    cdh-oneshot --config "$CDH_CONFIG" pull-image \
+        --image-url  "$img" \
+        --bundle-path "$BUNDLE_DIR"
+    umount -l "$BUNDLE_DIR/rootfs" 2>/dev/null || true   # clean up overlay mount
+    rm -rf "$BUNDLE_DIR"
+done
+
+# Pack once after all pulls — shared layers appear exactly once in the archive.
+mkfs.erofs -z lz4 -E dedupe layers.erofs "$WORK_DIR/image/layers"
+cp "$WORK_DIR/image/meta_store.json" meta_store.json
+```
+
+`meta_store.json` now contains all N images in `image_db` and `reference_db`.
+The boot-time script is unchanged — it bind-mounts every integer directory it
+finds in the erofs archive, regardless of how many images contributed to it.
+
+### Backward compatibility
+
+`EMBEDDED_IMAGE` (singular) is still accepted via a compat shim:
+
+```bash
+if [ -n "${EMBEDDED_IMAGE:-}" ] && [ -z "${EMBEDDED_IMAGES:-}" ]; then
+    EMBEDDED_IMAGES="$EMBEDDED_IMAGE"
+fi
+```
+
+### Stale-cache sentinel
+
+The sentinel file `layers.erofs.imageref` changes from a single image ref to a
+**sorted, newline-separated list**.  Any change to the list (addition, removal,
+or tag update) invalidates the entire cache and re-pulls all images.
+
+```bash
+# Write sentinel after a successful build
+printf '%s\n' $EMBEDDED_IMAGES | sort > layers.erofs.imageref
+
+# Stale-cache check on the next run
+CURRENT=$(printf '%s\n' $EMBEDDED_IMAGES | sort)
+CACHED=$(cat layers.erofs.imageref 2>/dev/null || true)
+if [ "$CURRENT" != "$CACHED" ]; then
+    rm -f layers.erofs meta_store.json layers.erofs.imageref
+fi
+```
+
+### Verification
+
+After building with two images, inspect `meta_store.json` to confirm both are
+present and shared layers are stored once:
+
+```bash
+# Both images registered
+jq '.image_db | length' meta_store.json
+# → 2
+
+# Unique layer count is less than the naive sum of each image's layer count
+jq '[.image_db[].layer_metas[].store_path] | unique | length' meta_store.json
+
+# Both image refs in the reference_db fast-path lookup
+jq '.reference_db | keys' meta_store.json
+```
+
+At runtime, request container creation for each embedded image in turn and
+confirm CDH resolves both from the local cache:
+
+```bash
+journalctl -u confidential-data-hub.service --no-pager | grep "Existing metadata"
+# → must appear for EACH of the embedded images
+```
+
+---
+
 ## Deploying to libvirt
 
 Upload the embedded qcow2 to the libvirt storage pool as the podvm base volume:
