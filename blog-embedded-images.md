@@ -1,0 +1,263 @@
+# Embedding Container Images into Confidential VMs: A Practical Guide
+
+*How we make peer pod VMs boot with your container image already inside, so
+they start in seconds and work even with no network access to the registry.*
+
+---
+
+## The problem
+
+When you run a pod in a confidential computing setup like CAA (Cloud API
+Adaptor), your container actually runs inside a virtual machine.  That VM has
+its own tiny operating system, and a component called **CDH** (Confidential
+Data Hub) is responsible for pulling the container image into the VM.
+
+This works fine, but it has two problems:
+
+1. **Slow** — every pod start downloads the image from a registry, inside the
+   VM, over the network.  A 700 MB image can add minutes of startup time.
+2. **Fragile** — if the VM cannot reach the registry (air-gapped environment,
+   blocked firewall, satellite link, rate limits), the pod simply cannot start.
+
+What if we could put the container image **into the VM image itself**, before
+the VM even boots?  Then CDH would find the image already present, serve it
+from local disk in milliseconds, and never need to talk to a registry.
+
+That is exactly what this project does.  We call it **embedding a container
+image**.
+
+---
+
+## The idea in one sentence
+
+Before the VM boots, we pre-pull the container image and bake its layers into
+the VM's root filesystem.  At boot, a small service copies the image's metadata
+into the CDH working directory and makes the layers visible.  When a pod asks
+CDH for that image, CDH finds it locally and creates the container instantly —
+no network needed.
+
+---
+
+## The two projects we had to change
+
+Making this work cleanly needed small changes in two open-source projects.
+
+### 1. guest-components (the CDH / image library)
+
+CDH uses a library called `image-rs` to manage images.  When you ask CDH to
+"pull image X", `image-rs` normally goes to the registry, reads the manifest,
+downloads the layers, and stores them in a local store.
+
+We added a fast path:
+
+- The store now keeps a map called **`reference_db`** — it records "image
+  reference → image ID".
+- On every `PullImage` call, `image-rs` first checks this map.
+- If the image reference is already in the map **and** its layers are present
+  locally, it skips the registry entirely and builds the container bundle from
+  what is on disk.
+- After a normal (online) pull, we also record the reference so the *next*
+  time is fast.
+
+This is a small, backwards-compatible change.  The two commits are:
+
+```
+image-rs: add reference-based image cache lookup to skip registry pull
+image-rs: write manifest-digest form into reference_db after pull
+```
+
+The second one matters because container runtimes like containerd resolve an
+image tag to a digest before passing it on.  We record both forms so the cache
+is hit whether CDH is asked for the tag or the digest.
+
+### 2. cloud-api-adaptor (CAA — the peer pod manager)
+
+CAA builds the peer pod VM images with a tool called mkosi.  We added:
+
+- A new build target `make image-embedded` that builds a podvm with a container
+  image pre-embedded.
+- The build pre-pulls the image using a small CLI called `cdh-oneshot`, then
+  copies the layers and metadata into the image.
+- A boot-time service, **`kata-image-cache`**, that:
+  1. copies the image metadata (`meta_store.json`) into CDH's working directory
+     first (so CDH always sees it),
+  2. bind-mounts each cached layer directory into the CDH layer store,
+     read-only.
+- A new mkosi profile (`embedded`) that enables the service only for embedded
+  images.
+
+The design choice that made it work: we **bind-mount** each layer directory
+onto a writable layer store, instead of mounting the whole cache read-only.
+Why?  If the layer store path itself were read-only, CDH would fail whenever it
+tried to add a new layer for an image not in the cache (with a confusing "failed
+to roll back when unpacking" error).  Keeping the store writable while exposing
+the embedded layers through read-only bind mounts gives us both: cached images
+are instant, and new images can still be pulled normally.
+
+---
+
+## The test setup (BYOM on kind)
+
+We validated everything on a local test environment using CAA's **BYOM**
+(Bring Your Own Machine) provider on a **kind** cluster.
+
+The neat thing about BYOM: the "VM" is actually a Docker container.  So we can
+`docker exec` into it and inspect exactly what CDH is doing — the journal, the
+mounts, the network — without needing a full virtualization setup.
+
+Here is what we did, step by step.
+
+### Step 1 — Build the patched CDH
+
+We built the CDH daemon and a small helper CLI (`cdh-oneshot`) from the updated
+guest-components branch:
+
+```
+confidential-data-hub  v0.21.0-04214c4e
+resource providers:    KBS, SEV
+kms plugins:           ALIYUN
+```
+
+### Step 2 — Pre-pull the test image
+
+Using `cdh-oneshot`, we pulled a small test image (`nginx`, 66 MB) and saved its
+layers plus its `meta_store.json`.  That file now contains the `reference_db`
+map:
+
+```json
+"reference_db": {
+  "docker.io/library/nginx:latest": "sha256:878c3373...",
+  "docker.io/library/nginx@sha256:1eeaa05a...": "sha256:878c3373..."
+}
+```
+
+### Step 3 — Build an embedded podvm image
+
+We took the standard BYOM podvm container image and added:
+
+- the patched CDH daemon,
+- the nginx layers at `/usr/lib/kata-cache/layers/`,
+- the `meta_store.json` at `/usr/lib/kata-cache/meta_store.json`,
+- the `kata-image-cache` boot service.
+
+### Step 4 — Deploy CAA with the embedded VMs
+
+We deployed CAA v0.22.0 on the kind cluster, pointed the BYOM pool at our three
+embedded VMs, and confirmed everything came up healthy.
+
+### Step 5 — Run the tests
+
+We created a pod that uses the embedded image with `imagePullPolicy:
+IfNotPresent` (so the node uses its local copy and the only question is whether
+CDH inside the VM can get the image).
+
+---
+
+## The results
+
+### Case A — registry open
+
+Pod started normally.  No surprises.
+
+### Case B — registry blocked, embedded image
+
+We blocked the registry **inside the VM** with iptables rules that drop every
+packet to docker.io.  Then we checked that the registry was truly unreachable,
+and created the pod again.
+
+**The pod reached Ready in 10 seconds.**
+
+Inside the VM, the CDH journal showed exactly what we hoped:
+
+```
+INFO image_rs::builder: Existing metadata found. Using previous ones.
+INFO image_rs::image: Image docker.io/library/nginx:latest found in local cache, creating bundle
+```
+
+That line — *"found in local cache, creating bundle"* — is the proof.  CDH did
+not pull anything.  It found the image in the embedded cache and built the
+container right there.
+
+We could also see the boot service had run and the layers were mounted:
+
+```
+kata-image-cache.service ... Active: active (exited)
+kata-image-cache-setup: kata-image-cache: bound layer 0
+kata-image-cache-setup: kata-image-cache: bound layer 1
+...
+/run/kata-containers/image/layers/0   overlay[/usr/lib/kata-cache/layers/0]   overlay ro
+```
+
+### Case C — registry blocked, image NOT embedded (the control)
+
+To make sure the block really was doing something, we ran a pod with a
+different image (`redis`) that was **not** in the embedded cache — same cluster,
+same block.
+
+```
+[CDH] [ERROR]: Image Pull error: Failed to pull image
+docker.io/library/redis:latest ... failed to pull image manifest:
+Not authorized: url https://index.docker.io/v2/library/redis/manifests/latest
+```
+
+It failed, exactly as expected.  CDH had no local copy, tried the registry, and
+was blocked.
+
+### The conclusion
+
+| Case | Image in embedded cache | Registry blocked | Result |
+|---|---|---|---|
+| A | nginx — yes | no | PASS |
+| B | nginx — yes | **yes** | **PASS** (10 s) |
+| C | redis — no | **yes** | FAIL |
+
+The embedded image runs with the registry completely unreachable; a
+non-embedded image fails.  The only explanation is that CDH serves the
+embedded image from local disk — **no registry contact is made**.
+
+---
+
+## Why this matters
+
+- **Fast pod startup** — image creation drops from "download over the network"
+  to "mount local layers" (milliseconds of CDH work).
+- **Works offline / air-gapped** — the VM never needs registry access for
+  embedded images.
+- **Resilient** — no rate-limit surprises, no registry outages during pod start.
+- **Fits confidential computing** — everything stays inside the trusted VM
+  boundary; the image is baked into the verified root filesystem.
+
+It is not for every scenario: for very large images the embedded cache grows the
+VM image, so for fast local registries the trade-off may not pay off.  Measure
+first.  But for air-gapped, restricted, or slow-network deployments it is a
+clean win.
+
+---
+
+## Where to find the changes
+
+The changes live on two local branches, ready to be opened as pull requests:
+
+| Project | Branch | What |
+|---|---|---|
+| guest-components | `image-cache-reference-db-v0.21.0` | `reference_db` fast path in image-rs |
+| cloud-api-adaptor | `feature/embedded-image-cache-v0.22.0` | `image-embedded` build + cache boot service |
+
+Both are based on the **latest releases** of their projects (guest-components
+v0.21.0, cloud-api-adaptor v0.22.0), so they are ready to be proposed upstream.
+
+The full technical details, build scripts, and test documentation are in the
+project repository:
+
+- [embedding-container-image-in-caa.md](embedding-container-image-in-caa.md) — the CAA/qcow2 approach
+- [embedding-container-image-in-kata-vm.md](embedding-container-image-in-kata-vm.md) — the Kata/QEMU approach
+- [experiments-caa.md](experiments-caa.md) — CAA validation experiments
+- [experiments-byom.md](experiments-byom.md) — the BYOM test described here
+- [build-kata-vm-verity.sh](build-kata-vm-verity.sh) — automated VM image build
+
+---
+
+## Acknowledgements
+
+This work builds on the guest-components and cloud-api-adaptor projects, and
+the Confidential Containers community around them.
