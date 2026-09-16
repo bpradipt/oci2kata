@@ -217,6 +217,41 @@ embedded image from local disk — **no registry contact is made**.
 
 ---
 
+## How fast is it? (measurements)
+
+To quantify the benefit we measured pod start time for a **large image**
+(`python:3.12`, 411 MB compressed, 1.6 GB uncompressed) in three configurations:
+
+1. **Regular pod** (runc) with the image already on the worker node — the
+   baseline for "container already present".
+2. **kata-remote with the embedded cache** — the image is inside the VM, and we
+   blocked the registry in the VM to prove the cache is what serves it.
+3. **kata-remote without embedding** — the stock VM pulls the 1.6 GB image from
+   the registry inside the guest.
+
+The image is pre-pulled on the node in all cases (`imagePullPolicy:
+IfNotPresent`), so the node-side is identical and no node download happens
+during the measured window.
+
+| Case | Run 1 | Run 2 | Run 3 | Median |
+|---|---|---|---|---|
+| Regular pod (runc), image on node | 1.89 s | 1.82 s | 1.78 s | **1.82 s** |
+| kata-remote **embedded**, VM registry blocked | 6.48 s | 6.82 s | 9.87 s | **6.82 s** |
+| kata-remote non-embedded, VM registry open | 59.09 s | 61.72 s | 66.22 s | **61.72 s** |
+
+**Result: embedding makes pod start ~9x faster** (61.7 s → 6.8 s median).  The
+55 s saved is exactly the in-guest download of the 1.6 GB image.
+
+The embedded case is ~3.7x the regular-pod baseline.  The remaining ~5 s gap is
+the peer pod VM boot (QEMU/UKI + kata-agent start) — an inherent kata-remote
+cost that has nothing to do with the image.  The image-specific latency is
+eliminated completely.
+
+Full methodology, the node-side analysis, and the CDH journal proof are in
+[perf_analysis.md](perf_analysis.md).
+
+---
+
 ## Why this matters
 
 - **Fast pod startup** — image creation drops from "download over the network"

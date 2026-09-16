@@ -10,6 +10,9 @@ cloud-api-adaptor v0.22.0).
 > `docker exec` into it and inspect the CDH journal, mounts, and network state
 > directly — much simpler than the libvirt/qcow2 route used in
 > [experiments-caa.md](experiments-caa.md).
+>
+> **Performance:** for the measured latency improvement (embedded vs
+> non-embedded), see [perf_analysis.md](perf_analysis.md).
 
 ---
 
