@@ -5,6 +5,10 @@ pod qcow2 is served by CDH from local cache with zero registry contact.
 
 > **See also:** [Kata/QEMU experiments](experiments.md) — the original four-case
 > validation this mirrors.  Setup and conclusions are directly comparable.
+>
+> **See also:** [BYOM validation](experiments-byom.md) — the same approach
+> validated end-to-end on the local CAA BYOM kind setup with the adapted
+> latest-release branches.
 
 ---
 
