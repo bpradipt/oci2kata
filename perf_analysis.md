@@ -162,6 +162,13 @@ non-embedded path grows linearly with image size / network latency.
 
 ## Notes / caveats
 
+- **Double pull:** if the image is fully absent from the node, containerd's CRI
+  `PullImage` downloads the **full image to the node** (manifest + all layers)
+  even for kata-remote — in addition to the in-guest pull.  This is avoided by
+  registering **only the manifest** on the node (image "present" for
+  `IfNotPresent`, no layer blobs), so the node never downloads layers and the
+  guest is the only place the image is pulled.  See
+  [no-double-pull.md](no-double-pull.md) and the `manifest-only-node.sh` helper.
 - The node-side CRI still references the image; if the image is absent on the
   node AND the node registry is blocked, the pod cannot start (containerd must
   resolve the manifest).  The embedded cache optimises the **in-guest** path,
