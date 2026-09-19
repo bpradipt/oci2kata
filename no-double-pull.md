@@ -169,6 +169,49 @@ The manifest-only node setup is what makes that statement true in practice.
 
 ---
 
+## Content-based proof: the marker test
+
+Byte-count deltas and the CDH journal are strong but indirect.  To make the
+verification airtight, we embedded a **unique marker file** that exists only in
+the embedded cache and verified it appears in the running container with all
+registries unreachable.
+
+### Setup
+
+1. Build a custom image `marker-image:proof` = python:3.12 plus a file
+   `/opt/embedded-proof/PROOF.txt` containing a unique 64-hex random secret
+   (generated once, known only to us).
+2. Push it to a throwaway local registry, then pre-pull it during the embedded
+   podvm build with `cdh-oneshot` — so the marker lives **only** in the
+   embedded cache inside the podvm image.
+3. Register the image **manifest only** on the worker node (manifest + config,
+   no layer blobs).
+4. Block the registry **inside the peer pod VM** (iptables) and confirm the
+   node holds no layers.
+5. Run the pod with `imagePullPolicy: IfNotPresent`.
+
+### Result (all four checks)
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Marker file inside the running container | `cat /opt/embedded-proof/PROOF.txt` printed the secret |
+| 2 | VM registry blocked | `curl` to the registry → connection refused |
+| 3 | Node content store for the image | **1,203 bytes** total (manifest/config/index only, zero layers) |
+| 4 | Embedded cache inside the VM | `find /usr/lib/kata-cache/layers -name PROOF.txt` → same secret |
+
+CDH journal:
+
+```
+INFO image_rs::image: Image 172.18.0.9:5000/marker-image:proof found in local cache, creating bundle
+```
+
+The secret is a random 64-hex value that exists nowhere except the embedded
+cache.  Its presence in the container, with the VM registry blocked and only
+1.2 KB of manifest on the node, proves the layers were served **from the
+embedded cache** — no local (node) pull and no in-guest registry pull.
+
+---
+
 ## Files
 
 - This document: `no-double-pull.md`
