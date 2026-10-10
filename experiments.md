@@ -1,12 +1,12 @@
-# Embedding Container Image in Kata VM — Investigation Findings
+# Embedding Container Image in Kata VM: Investigation Findings
 
-> **See also:** [CAA experiments](experiments-caa.md) — the same four-case
+> **See also:** [CAA experiments](experiments-caa.md), the same four-case
 > validation adapted for Cloud API Adaptor (`kata-remote` runtime class).
 
 ## Overview
 
 This document captures all findings from investigating whether a container image
-pre-embedded inside a Kata VM image is actually used at runtime (instead of being
+pre-embedded inside a Kata VM image is used at runtime (instead of being
 pulled from the registry inside the guest), including methodology, raw logs, and
 conclusions.
 
@@ -55,7 +55,7 @@ trying to reach a network KBS (Key Broker Service) during initialization.
 At VM boot, `kata-image-cache.service` runs **before** `kata-agent.service`:
 
 ```bash
-# Current service (tar-extraction approach — layers in native tmpfs)
+# Current service (tar-extraction approach, layers in native tmpfs)
 mount -t erofs -o loop /opt/kata-cache/layers.erofs /run/kata-layers-erofs
 mkdir -p /run/kata-containers/image/layers /run/kata-containers/image/overlay
 tar -c -C /run/kata-layers-erofs . | tar -x -C /run/kata-containers/image/layers
@@ -129,24 +129,24 @@ the in-guest CDH behavior as the only variable.
 
 ## Blocking Approach
 
-Two mechanisms are combined to block registry access completely:
+Two mechanisms are combined to block registry access:
 
-**Host-side (node) — blocks kubelet, crictl, podman:**
+**Host-side (node)** blocks kubelet, crictl, podman:
 ```bash
 echo "0.0.0.0 quay.io  # block-registry-test" | sudo tee -a /etc/hosts
 ```
 `/etc/hosts` is checked **before** DNS. When containerd resolves `quay.io` it
 gets `0.0.0.0` and immediately fails: `dial tcp 0.0.0.0:443: connect: connection
-refused`. Only the hostname `quay.io` is affected — SSH access and all other
+refused`. Only the hostname `quay.io` is affected; SSH access and all other
 HTTPS traffic are unaffected.
 
 **Why `/etc/hosts` alone is not enough for kata VMs:**
 The kata VM is a full virtual machine with its **own network stack and DNS
 resolver**. The host's `/etc/hosts` is not visible inside the VM. CDH inside
 the VM resolves `quay.io` through its own DNS (the pod's DNS, routed via the
-CNI bridge) and gets real IPs — the host `/etc/hosts` entry has no effect on it.
+CNI bridge) and gets real IPs, so the host `/etc/hosts` entry has no effect on it.
 
-**In-VM side — blocks kata VM's CDH:**
+**In-VM side** blocks kata VM's CDH:
 ```bash
 sudo iptables -I FORWARD -s 10.244.0.0/24 -p tcp --dport 443 \
   -m comment --comment "block-registry-test-vm" -j REJECT --reject-with tcp-reset
@@ -180,7 +180,7 @@ sudo iptables -D FORWARD -s 10.244.0.0/24 -p tcp --dport 443 \
 
 ---
 
-### Case 1 — Regular pod | image OFF node | registry BLOCKED → FAIL
+### Case 1: Regular pod | image OFF node | registry BLOCKED → FAIL
 
 **Purpose:** Confirm the blocking mechanism works; kubelet cannot pull.
 
@@ -215,7 +215,7 @@ Warning  Failed    Error: ImagePullBackOff
 
 ---
 
-### Case 2 — Regular pod | registry UNBLOCKED → PASS, image cached
+### Case 2: Regular pod | registry UNBLOCKED → PASS, image cached
 
 **Purpose:** Confirm image is reachable normally; image gets cached on node.
 
@@ -249,10 +249,10 @@ quay.io/bpradipt/kata-vm-image   7may   f0a289dca6e63   702MB
 
 ---
 
-### Case 3 — Kata pod | STANDARD VM | registry BLOCKED → FAIL
+### Case 3: Kata pod | STANDARD VM | registry BLOCKED → FAIL
 
 **Purpose:** Prove that without embedded cache, even a kata pod fails when the
-registry is blocked — standard CDH always contacts the registry inside the VM.
+registry is blocked: standard CDH always contacts the registry inside the VM.
 
 **Setup:**
 ```bash
@@ -275,7 +275,7 @@ kubectl apply -f test-kata-pod.yaml  # imagePullPolicy: IfNotPresent
 Node image is cached → node-side "pull" instant (`already present on machine`).
 The only variable: does CDH inside the VM reach the registry?
 
-**Result: FAIL — CrashLoopBackOff**
+**Result: FAIL (CrashLoopBackOff)**
 
 ```
 NAME       READY   STATUS              RESTARTS      AGE
@@ -298,12 +298,12 @@ Warning  BackOff  Back-off restarting failed container
 ```
 
 The node-side pull was skipped (`already present on machine`). Inside the VM,
-the standard CDH attempted `https://quay.io/v2/.../manifests/7may` — the FORWARD
+the standard CDH attempted `https://quay.io/v2/.../manifests/7may`, and the FORWARD
 iptables rule rejected the connection. CDH failed; container never started.
 
 ---
 
-### Case 4 — Kata pod | EMBEDDED VM | registry BLOCKED → PASS
+### Case 4: Kata pod | EMBEDDED VM | registry BLOCKED → PASS
 
 **Purpose:** Prove that with the embedded image, the kata pod succeeds even
 when no registry access is possible from inside the VM.
@@ -347,10 +347,10 @@ provided all the layer data CDH needed.
 
 | Case | VM image | Node image | Registry | imagePullPolicy | Result |
 |---|---|---|---|---|---|
-| 1 | standard | **absent** | **blocked** | Always | **FAIL** — ErrImagePull |
-| 2 | standard | absent | open | Always | **PASS** — pulled 14.4s, cached |
-| 3 | standard | cached | **blocked** | IfNotPresent | **FAIL** — CDH registry error |
-| 4 | **embedded** | cached | **blocked** | IfNotPresent | **PASS** — 10.5s, no registry |
+| 1 | standard | **absent** | **blocked** | Always | **FAIL**: ErrImagePull |
+| 2 | standard | absent | open | Always | **PASS**: pulled 14.4s, cached |
+| 3 | standard | cached | **blocked** | IfNotPresent | **FAIL**: CDH registry error |
+| 4 | **embedded** | cached | **blocked** | IfNotPresent | **PASS**: 10.5s, no registry |
 
 **Conclusion: The embedded container image is definitively used by CDH inside
 the kata VM. No registry contact is made when the embedded cache is present.**
@@ -359,7 +359,7 @@ the kata VM. No registry contact is made when the embedded cache is present.**
 
 ## Supporting Measurements
 
-### CDH CPU usage (entire lifetime — 35s uptime)
+### CDH CPU usage (entire lifetime, 35s uptime)
 
 Measured via `/proc/PID/stat` inside the running VM:
 
@@ -369,7 +369,7 @@ Measured via `/proc/PID/stat` inside the running VM:
 | `kata-agent` | **15 ticks = 150ms** | 36s | Near-zero compute |
 
 Standard CDH downloading 700MB at 50 MB/s would consume ~14s of CPU for
-decompression and extraction. 160ms total rules that out completely.
+decompression and extraction. 160ms total rules that out.
 
 ### Real-time network monitoring (sampled every 1–2 seconds, 30s window)
 
@@ -405,7 +405,7 @@ Both baseline (standard CDH, no embedding) and embedded approach show
 
 The 18s is an unexplained kata-agent container setup overhead that is
 independent of whether the embedded cache is used. It does not affect the
-correctness of the embedding — the pod still starts and uses the embedded
+correctness of the embedding: the pod still starts and uses the embedded
 layers correctly.
 
 ---

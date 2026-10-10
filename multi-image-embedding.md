@@ -1,10 +1,10 @@
-# Multi-Image Embedding — Validation
+# Multi-Image Embedding: Validation
 
 Extends the [single-image embedding validation](no-double-pull.md) to **two
 container images** embedded in the same peer pod VM, each with its own unique
 marker file.  Proves that multiple images can be served from the embedded cache
 simultaneously, with shared layers deduplicated and each image resolved
-independently by CDH — with all registries unreachable.
+independently by CDH, with all registries unreachable.
 
 ---
 
@@ -85,21 +85,21 @@ Verified blocked on all three pool VMs before running the pods.
 
 ## Validation
 
-### Case A — image A pod, registry blocked
+### Case A: image A pod, registry blocked
 
 ```bash
 kubectl exec multi-a-test -- cat /opt/embedded-proof/PROOF1.txt
 # → 96535fe1d9b362edfb8e8dec1156f514dc79ff2e8bdafce96187f46afbc62b9c
 ```
 
-### Case B — image B pod, registry blocked
+### Case B: image B pod, registry blocked
 
 ```bash
 kubectl exec multi-b-test -- cat /opt/embedded-proof/PROOF2.txt
 # → d5928b9e3e88d01cf5c6734f1c1174c7f1939682314aaf47427d4d02840238fe
 ```
 
-Both matched the expected secrets exactly.
+Both matched the expected secrets.
 
 ### CDH journals (inside the pool VMs)
 
@@ -108,7 +108,7 @@ INFO image_rs::image: Image 172.18.0.9:5000/multi-image-a:proof found in local c
 INFO image_rs::image: Image 172.18.0.9:5000/multi-image-b:proof found in local cache, creating bundle
 ```
 
-`found in local cache` is the `reference_db` fast path — CDH resolved each image
+`found in local cache` is the `reference_db` fast path: CDH resolved each image
 independently from the embedded cache.
 
 ---
@@ -120,10 +120,10 @@ independently from the embedded cache.
 2. **Each image is resolved independently** via its own `reference_db` entry
    (tag + digest forms).
 3. **Shared layers are deduplicated**: layers shared between the two images are
-   stored once (`layer_db` of 18 < naive sum), exactly as `image-rs` layer_db
+   stored once (`layer_db` of 18 < naive sum), as `image-rs` layer_db
    dedup is designed to do.
 4. **No registry contact**: with the registry blocked on every pool VM, both
-   markers still appear in their containers — the only possible source is the
+   markers still appear in their containers; the only possible source is the
    embedded cache.
 
 ---

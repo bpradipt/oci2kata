@@ -1,12 +1,12 @@
-# Embedding Container Image in CAA — Validation Experiments
+# Embedding Container Image in CAA: Validation Experiments
 
 Four-case validation confirming that a container image embedded in a CAA peer
 pod qcow2 is served by CDH from local cache with zero registry contact.
 
-> **See also:** [Kata/QEMU experiments](experiments.md) — the original four-case
-> validation this mirrors.  Setup and conclusions are directly comparable.
+> **See also:** [Kata/QEMU experiments](experiments.md), the original four-case
+> validation this mirrors.  Setup and conclusions are comparable.
 >
-> **See also:** [BYOM validation](experiments-byom.md) — the same approach
+> **See also:** [BYOM validation](experiments-byom.md), the same approach
 > validated end-to-end on the local CAA BYOM kind setup with the adapted
 > latest-release branches.
 
@@ -16,20 +16,20 @@ pod qcow2 is served by CDH from local cache with zero registry contact.
 
 | Case | VM image | Node image | Registry | imagePullPolicy | Result |
 |---|---|---|---|---|---|
-| 1 | embedded qcow2 | **absent** | **blocked** | IfNotPresent | **FAIL** — ErrImagePull (node can't pull) |
-| 2 | embedded qcow2 | absent | open | IfNotPresent | **PASS** — image cached on node |
-| 3 | embedded qcow2 | cached | **blocked** | IfNotPresent | **PASS** — 52 s, CDH uses embedded cache |
-| 4 | embedded qcow2 | **removed** | **blocked** | IfNotPresent | **FAIL** — ErrImagePull (node can't pull) |
+| 1 | embedded qcow2 | **absent** | **blocked** | IfNotPresent | **FAIL**: ErrImagePull (node can't pull) |
+| 2 | embedded qcow2 | absent | open | IfNotPresent | **PASS**: image cached on node |
+| 3 | embedded qcow2 | cached | **blocked** | IfNotPresent | **PASS**: 52 s, CDH uses embedded cache |
+| 4 | embedded qcow2 | **removed** | **blocked** | IfNotPresent | **FAIL**: ErrImagePull (node can't pull) |
 
 **Conclusion:** The embedded container image is used by CDH inside the CAA peer
 pod VM.  No registry contact is made when the node image cache allows the pod to
 reach kata-remote and the embedded cache is present.
 
-> **Note on Case numbering:** Cases 3 and 4 here map directly to Cases 4 and the
+> **Note on Case numbering:** Cases 3 and 4 here map to Cases 4 and the
 > "no-node-cache" negative control from the Kata/QEMU experiments.  The CAA
 > experiments skip the Kata/QEMU Case 3 (standard VM + registry blocked) because
 > the standard CAA mkosi image does not ship the patched CDH and cannot be
-> directly compared.
+> compared.
 
 ---
 
@@ -62,16 +62,16 @@ ssh ubuntu@$WORKER_IP \
 
 ## Blocking mechanism
 
-Two mechanisms block registry access completely:
+Two mechanisms block registry access:
 
-**Node side (`/etc/hosts`)** — blocks kubelet and containerd:
+**Node side (`/etc/hosts`)**: blocks kubelet and containerd:
 ```bash
 echo "0.0.0.0 quay.io" | sudo tee -a /etc/hosts
 ```
 When containerd resolves `quay.io` it gets `0.0.0.0` and fails immediately:
 `dial tcp 0.0.0.0:443: connect: connection refused`.
 
-**In-VM side (`iptables FORWARD`)** — blocks CDH inside the peer pod VM:
+**In-VM side (`iptables FORWARD`)**: blocks CDH inside the peer pod VM:
 ```bash
 QUAY_IPS=$(getent ahosts quay.io | awk '{print $1}' | sort -u)
 for IP in $QUAY_IPS; do
@@ -95,7 +95,7 @@ done
 
 ---
 
-## Case 1 — Node image absent | registry BLOCKED → FAIL (expected)
+## Case 1: Node image absent | registry BLOCKED → FAIL (expected)
 
 **Purpose:** Confirm the block works end-to-end; without the node cache,
 `IfNotPresent` behaves like `Always` and containerd fails to pull.
@@ -132,7 +132,7 @@ Warning  Failed  Failed to pull image "quay.io/bpradipt/kata-vm-image:7may":
 
 ---
 
-## Case 2 — Node image absent | registry OPEN → PASS, image cached
+## Case 2: Node image absent | registry OPEN → PASS, image cached
 
 **Purpose:** Cache the image on the worker node for Cases 3 and 4.
 
@@ -168,7 +168,7 @@ quay.io/bpradipt/kata-vm-image   7may   f0a289dca6e63   702MB
 
 ---
 
-## Case 3 — Node image CACHED | registry BLOCKED → PASS ✅
+## Case 3: Node image CACHED | registry BLOCKED → PASS ✅
 
 **Purpose:** Prove the embedded CDH cache serves the container with zero
 registry contact.  `IfNotPresent` lets kubelet skip the node-side pull
@@ -229,11 +229,11 @@ for IP in $QUAY_IPS; do sudo iptables -D OUTPUT -d "$IP" -j DROP 2>/dev/null; su
 
 ---
 
-## Case 4 — Node image REMOVED | registry BLOCKED → FAIL (negative control)
+## Case 4: Node image REMOVED | registry BLOCKED → FAIL (negative control)
 
 **Purpose:** Confirm that Case 3's success requires the node image cache.
 Without it, `IfNotPresent` falls back to a pull, which the block prevents.
-This proves the embedded CDH cache alone is not sufficient — the node-level
+This proves the embedded CDH cache alone is not sufficient: the node-level
 image presence is also required to pass the pod through to `kata-remote`.
 
 **Setup:**
@@ -264,7 +264,7 @@ Warning  Failed  Failed to pull image "quay.io/bpradipt/kata-vm-image:7may":
   dial tcp 0.0.0.0:443: connect: connection refused
 ```
 
-Failure is at the containerd/node level — `kata-remote` and CDH are never
+Failure is at the containerd/node level; `kata-remote` and CDH are never
 reached.  This is the expected behavior: `IfNotPresent` without a node cache
 behaves like `Always`, and the block prevents the pull.
 

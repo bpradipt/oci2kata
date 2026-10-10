@@ -3,7 +3,7 @@
 Embed a container image into the Kata VM disk image so CDH (Confidential Data Hub)
 serves it from local cache without any registry contact inside the VM.
 
-> **See also:** [CAA peer pod approach](embedding-container-image-in-caa.md) —
+> **See also:** [CAA peer pod approach](embedding-container-image-in-caa.md),
 > the same technique adapted for Cloud API Adaptor (mkosi-built qcow2,
 > `kata-remote` runtime class).
 
@@ -207,7 +207,7 @@ EOF
 
 The process above creates a **single-partition image with dm-verity disabled** because
 the original kata image's hash is no longer valid after the rootfs is modified. To keep
-dm-verity, you must compute a fresh hash after finalising the rootfs — which requires a
+dm-verity, you must compute a fresh hash after finalising the rootfs. That requires a
 two-partition layout (`p1` = rootfs data, `p2` = Merkle hash tree).
 
 ### How it differs from the existing approach
@@ -218,14 +218,14 @@ two-partition layout (`p1` = rootfs data, `p2` = Merkle hash tree).
 | Boot | `root=/dev/pmem0p1` direct | `root=/dev/dm-0` via dm-verity |
 | `kernel_verity_params` | empty string | `root_hash=…,salt=…,data_blocks=…` |
 | Tamper detection | None | Yes (kernel panics on corruption) |
-| dm-verity hash valid | N/A (disabled) | Yes — hash computed after rootfs is finalised |
+| dm-verity hash valid | N/A (disabled) | Yes, hash computed after rootfs is finalised |
 | Original kata hash | Discarded | Must recompute with `veritysetup format` |
 
 ### Partition layout
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Raw image file  (multiple of 2 MiB — NVDIMM alignment)    │
+│ Raw image file  (multiple of 2 MiB, NVDIMM alignment)     │
 ├──────┬──────────────────────────┬──────────────────────────┤
 │ 3MiB │ p1: ext4 rootfs (data)  │ p2: dm-verity hash tree  │
 │ gap  │  - original kata rootfs │  - SHA-256 Merkle tree   │
@@ -237,7 +237,7 @@ two-partition layout (`p1` = rootfs data, `p2` = Merkle hash tree).
 ```
 
 The Merkle tree in `p2` covers every 4 KiB block of `p1`. `veritysetup format`
-computes the tree and returns the root hash, salt, and block count — these go into
+computes the tree and returns the root hash, salt, and block count. These go into
 `kernel_verity_params` in the kata config drop-in.
 
 ### Automated build
@@ -438,7 +438,7 @@ Non-aligned sizes cause `nd_pmem: probe failed with error -95 (EOPNOTSUPP)`.
 
 ```
 Valid:   384MB = 192 × 2MB ✓    768MB = 384 × 2MB ✓    1536MB = 768 × 2MB ✓
-Invalid: 734MB, 769MB — nd_pmem probe fails, kernel panic at boot
+Invalid: 734MB, 769MB. nd_pmem probe fails, kernel panic at boot
 ```
 
 ### Never Extend an Existing Image
@@ -450,7 +450,7 @@ ignoring the extended space. Always create a fresh image at the target size.
 The default `kata-qemu-coco-dev` configuration uses dm-verity over NVDIMM partitions
 (`/dev/pmem0p1` data, `/dev/pmem0p2` hash tree). When the rootfs is modified (CDH
 binary replaced, erofs cache added), the original hash in `kernel_verity_params` no
-longer matches the data — the kernel detects corruption and panics. The workaround used
+longer matches the data, so the kernel detects corruption and panics. The workaround used
 in the existing custom images is to disable dm-verity (`kernel_verity_params = ""`). The
 correct approach is to recompute the hash after finalising the rootfs, which is what
 `build-kata-vm-verity.sh` does.
@@ -458,8 +458,8 @@ correct approach is to recompute the hash after finalising the rootfs, which is 
 ### Filesystem Compression: erofs only
 The kata kernel (6.18.28) has:
 - `CONFIG_EROFS_FS=y` with `CONFIG_EROFS_FS_ZIP=y` (lz4 only)
-- `CONFIG_SQUASHFS` — not set
-- `CONFIG_EROFS_FS_ZIP_LZMA` — not set
+- `CONFIG_SQUASHFS`: not set
+- `CONFIG_EROFS_FS_ZIP_LZMA`: not set
 
 Only erofs with lz4 compression is available. Compression ratios vary:
 - fedora:41 layers (325MB → 96MB with lz4+dedup): good compression
@@ -475,7 +475,7 @@ The cache service uses two stacked mounts to allow both cache hits and new layer
 ```
 
 The image-rs snapshotter creates container bundle overlays at
-`/run/kata-containers/image/overlay/<hash>/` which lands directly on tmpfs —
+`/run/kata-containers/image/overlay/<hash>/` which lands directly on tmpfs,
 avoiding the "overlay-on-overlay upperdir" restriction.
 
 ### When Embedding Helps vs Hurts

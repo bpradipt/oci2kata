@@ -1,4 +1,4 @@
-# Embedding Container Images in CAA — BYOM Validation
+# Embedding Container Images in CAA: BYOM Validation
 
 End-to-end validation of the embedded container image approach using the local
 CAA **BYOM** (Bring Your Own Machine) setup on a kind cluster.  This proves the
@@ -8,7 +8,7 @@ cloud-api-adaptor v0.22.0).
 
 > **Why BYOM?**  In BYOM the peer pod "VM" is a Docker container, so we can
 > `docker exec` into it and inspect the CDH journal, mounts, and network state
-> directly — much simpler than the libvirt/qcow2 route used in
+> directly, much simpler than the libvirt/qcow2 route used in
 > [experiments-caa.md](experiments-caa.md).
 >
 > **Performance:** for the measured latency improvement (embedded vs
@@ -48,8 +48,8 @@ resource providers:    KBS, SEV
 kms plugins:           ALIYUN
 ```
 
-- `confidential-data-hub` — the daemon (with `reference_db` support)
-- `cdh-oneshot` — the one-shot CLI used to pre-pull the image at build time
+- `confidential-data-hub`: the daemon (with `reference_db` support)
+- `cdh-oneshot`: the one-shot CLI used to pre-pull the image at build time
   (built with `ONE_SHOT=true`, which renames the output; save the daemon first)
 
 ### 3. Embedded podvm-byom container image
@@ -66,7 +66,7 @@ Built from `podvm-byom-e2e-image-amd64:latest` plus:
 | drop-ins for CDH + kata-agent | soft `Wants=`/`After=` the cache service |
 
 The pre-pull ran inside the Docker build via `cdh-oneshot pull-image`
-(`--security=insecure --network=host`), exactly like the mkosi Dockerfile.
+(`--security=insecure --network=host`), like the mkosi Dockerfile.
 
 `meta_store.json` contains both the tag and digest forms in `reference_db`:
 
@@ -104,14 +104,14 @@ CLOUD_PROVIDER=byom make deploy
 
 ### 6. Test image
 
-`docker.io/library/nginx:latest` (66 MB) — cached on the node so kubelet's
+`docker.io/library/nginx:latest` (66 MB), cached on the node so kubelet's
 `IfNotPresent` skips the node-side pull; the only variable is CDH inside the VM.
 
 ---
 
 ## Validation cases
 
-### Case A — embedded image, registry OPEN → PASS
+### Case A: embedded image, registry OPEN → PASS
 
 ```yaml
 # test-embedded.yaml
@@ -134,7 +134,7 @@ spec:
 
 Pod reached `Running`; pool VM `172.18.0.6` allocated.
 
-### Case B — embedded image, registry BLOCKED → PASS ✅
+### Case B: embedded image, registry BLOCKED → PASS ✅
 
 Registry blocked **inside the pool VMs** (iptables DROP on every docker.io IP):
 
@@ -148,14 +148,14 @@ done
 
 Verified unreachable before running the pod.
 
-**Result: pod Running, Ready in 10 s** — with the registry completely blocked.
+**Result: pod Running, Ready in 10 s**, with the registry blocked.
 
 ```
 NAME                  READY   STATUS    RESTARTS   AGE   IP               NODE               NOMINATED NODE
 embedded-image-test   1/1     Running   0          16s   192.168.107.73   peer-pods-worker   <none>
 ```
 
-### Case C — NOT-embedded image, registry BLOCKED → FAIL (control) ❌
+### Case C: NOT-embedded image, registry BLOCKED → FAIL (control) ❌
 
 Same block, same cluster, different image (`docker.io/library/redis:latest`,
 not in the embedded cache):
@@ -173,9 +173,9 @@ Warning  Failed  Error: failed to create containerd task:
 
 | Case | Image in embedded cache | Registry blocked | Result |
 |---|---|---|---|
-| A | nginx — yes | no | **PASS** (Running) |
-| B | nginx — yes | **yes** | **PASS** (Running, 10 s) |
-| C | redis — no | **yes** | **FAIL** (CDH pull blocked) |
+| A | nginx, yes | no | **PASS** (Running) |
+| B | nginx, yes | **yes** | **PASS** (Running, 10 s) |
+| C | redis, no | **yes** | **FAIL** (CDH pull blocked) |
 
 Cases B and C together are conclusive: with the registry unreachable, the
 embedded image still runs and a non-embedded image fails.  The only way CDH
@@ -187,7 +187,7 @@ could serve nginx is the local embedded cache.
 
 Collected via `docker exec` into the allocated pool VM:
 
-### 1. CDH journal — the cache hit
+### 1. CDH journal: the cache hit
 
 ```
 INFO image_rs::builder: Existing metadata found. Using previous ones.
@@ -195,7 +195,7 @@ INFO image_rs::image: Image docker.io/library/nginx:latest found in local cache,
 ```
 
 `found in local cache, creating bundle` is emitted by the `reference_db` fast
-path added in the guest-components patch — image-rs created the bundle directly
+path added in the guest-components patch. image-rs created the bundle directly
 from the local layer store, with no registry round-trip.
 
 ### 2. Boot cache service
@@ -230,12 +230,12 @@ kata-image-cache-setup[64]: kata-image-cache: bound layer 2
 
 ## What this proves
 
-1. The **guest-components `reference_db` patch** works on v0.21.0 — CDH hits the
+1. The **guest-components `reference_db` patch** works on v0.21.0: CDH hits the
    local cache on the first `PullImage` call and skips the registry.
-2. The **CAA embedded image support** works on v0.22.0 — the podvm carries the
+2. The **CAA embedded image support** works on v0.22.0: the podvm carries the
    cache and the boot service populates the CDH layer store before CDH/agent
    start.
-3. **No registry contact is made** when the embedded cache is present — proven
+3. **No registry contact is made** when the embedded cache is present, proven
    by the in-VM registry block combined with the redis control failure.
 
 ---

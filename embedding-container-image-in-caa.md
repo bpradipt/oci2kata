@@ -3,7 +3,7 @@
 Embed a container image into a CAA (Cloud API Adaptor) peer pod qcow2 so CDH
 serves it from local cache with zero registry contact inside the VM.
 
-> **See also:** [Kata/QEMU approach](embedding-container-image-in-kata-vm.md) —
+> **See also:** [Kata/QEMU approach](embedding-container-image-in-kata-vm.md),
 > the original implementation this is based on.  The CAA approach shares the same
 > CDH fork and `meta_store.json` format; the differences are in the VM image
 > build tooling, filesystem layout, and layer store mount strategy.
@@ -116,10 +116,10 @@ kata-agent: container bundle ready, container starts.
 
 Three designs were tried:
 
-**Design 1 — `cp -a` layers to tmpfs**: copying 700 MB of layers before
+**Design 1: `cp -a` layers to tmpfs**: copying 700 MB of layers before
 kata-agent could start added minutes of latency.
 
-**Design 2 — direct erofs mount at the CDH layer store path**:
+**Design 2: direct erofs mount at the CDH layer store path**:
 mounting erofs at `/run/kata-containers/image/layers` made the CDH layer store
 read-only.  Any attempt by CDH to create a new layer directory (e.g. a
 reference_db miss, or a different embedded image) hit EROFS; the subsequent
@@ -130,7 +130,7 @@ producing the opaque error:
 Failed to decode layer data stream: Failed to roll back when unpacking
 ```
 
-**Design 3 (current) — bind-mount per layer onto writable tmpfs**:
+**Design 3 (current): bind-mount per layer onto writable tmpfs**:
 
 ```
 /run/kata-cache-erofs/          private erofs mount (ro)
@@ -227,21 +227,21 @@ if let Some(layer_meta) = ms.read().await.layer_db.get(&layer.digest) {
 ```
 
 Pulling Image B into the same `work_dir` as Image A returns the **existing**
-integer directory for any layer whose digest is already in `layer_db` — nothing
+integer directory for any layer whose digest is already in `layer_db`.  Nothing
 is written twice.  After all pulls, `meta_store.json` contains every image in
-`image_db` and `reference_db`, and every unique layer exactly once in `layer_db`.
+`image_db` and `reference_db`, and every unique layer once in `layer_db`.
 No manual merge step, no external digest registry file.
 
 ### The pull loop pattern
 
 Replace the single `cdh-oneshot pull-image` call in Stage 2 with a loop.  The
 **`work_dir` is shared** across all iterations; the **`bundle-path` is
-per-image** — `cdh-oneshot` writes `config.json` into `bundle-path` on every
+per-image**: `cdh-oneshot` writes `config.json` into `bundle-path` on every
 invocation and fails with `"OCI config file already exists"` if the same
 directory is reused for a second image.
 
 ```bash
-# One CDH config — work_dir shared across all pulls so layer_db dedup applies.
+# One CDH config: work_dir shared across all pulls so layer_db dedup applies.
 CDH_CONFIG=$(mktemp /tmp/cdh-build-XXXXXX.toml)
 WORK_DIR=$(mktemp -d)
 mkdir -p "$WORK_DIR/image"
@@ -259,7 +259,7 @@ EOF
 # EMBEDDED_IMAGES is a space-separated list of OCI image refs.
 # Each pull extends layer_db and image_db in-place; shared layers are reused.
 for img in $EMBEDDED_IMAGES; do
-    BUNDLE_DIR=$(mktemp -d)         # fresh dir per image — mandatory
+    BUNDLE_DIR=$(mktemp -d)         # fresh dir per image (mandatory)
     cdh-oneshot --config "$CDH_CONFIG" pull-image \
         --image-url  "$img" \
         --bundle-path "$BUNDLE_DIR"
@@ -267,13 +267,13 @@ for img in $EMBEDDED_IMAGES; do
     rm -rf "$BUNDLE_DIR"
 done
 
-# Pack once after all pulls — shared layers appear exactly once in the archive.
+# Pack once after all pulls: shared layers appear once in the archive.
 mkfs.erofs -z lz4 -E dedupe layers.erofs "$WORK_DIR/image/layers"
 cp "$WORK_DIR/image/meta_store.json" meta_store.json
 ```
 
 `meta_store.json` now contains all N images in `image_db` and `reference_db`.
-The boot-time script is unchanged — it bind-mounts every integer directory it
+The boot-time script is unchanged: it bind-mounts every integer directory it
 finds in the erofs archive, regardless of how many images contributed to it.
 
 ### Backward compatibility
@@ -354,7 +354,7 @@ The embedded UKI bundles a 62.6 MB compressed initrd; UEFI needs ~4 GB of RAM to
 load it.  Two timeouts also need raising:
 
 ```bash
-# kata-remote dial_timeout (default 30 s — too short for the UEFI + UKI boot)
+# kata-remote dial_timeout (default 30 s, too short for the UEFI + UKI boot)
 sudo sed -i 's/dial_timeout = [0-9]*/dial_timeout = 600/' \
   /opt/kata/share/defaults/kata-containers/configuration-remote.toml
 
@@ -418,11 +418,11 @@ kubectl exec embedded-image-test -- echo "running from embedded cache"
 |---|---|
 | T+0 s | CAA creates VM (COW overlay on podvm-base.qcow2) |
 | T+20 s | VM ready, APF connects to worker node |
-| T+27 s | CreateContainer — CDH resolves image from reference_db, overlay mounted |
-| T+28 s | StartContainer — container running |
+| T+27 s | CreateContainer: CDH resolves image from reference_db, overlay mounted |
+| T+28 s | StartContainer: container running |
 
 CDH resolves `quay.io/bpradipt/kata-vm-image:7may` from the embedded
-reference_db on first request — no network contact, no layer download.
+reference_db on first request, with no network contact and no layer download.
 
 ---
 
