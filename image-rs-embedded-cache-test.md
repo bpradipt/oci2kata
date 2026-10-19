@@ -15,6 +15,7 @@ cached path**. It is preparation for a PR against
 | `cdh-oneshot` fast-path proof (registry blocked, served from cache) | ✅ verified |
 | `cdh-oneshot` signature-verification proof (signed accepted, wrong-key rejected) | ✅ verified |
 | Kata/QEMU (v4.0.0) embedded-image end-to-end | ✅ verified (after bind-mount fix) |
+| Kata/QEMU (v4.0.0) signature verification on cached path | ✅ verified (signed accepted, wrong-key rejected) |
 
 The image-rs change is **proven correct end-to-end**. The one Kata-specific
 integration gotcha (the embedded `meta_store.json` is deleted by the kata-agent
@@ -302,6 +303,66 @@ $ stat /run/kata-containers/image/layers/0 | grep Birth
  Birth: 2026-10-19 04:07:16 ...   # cache-service time, not CDH re-pull
 ```
 
+### Signature verification inside the Kata VM (full integration)
+
+Built a second VM image embedding the **signed** test image
+`quay.io/kata-containers/confidential-containers:signed`, plus the signature
+infrastructure baked into the rootfs (local `file://` sigstore under
+`/etc/containers/quay_verification/signatures`, the GPG pubkey at
+`/etc/containers/pubkey.asc`, and `/etc/image-policy.json` +
+`/etc/sigstore-config.yaml`). `reference_db` for the signed image was populated
+by the pre-pull:
+
+```
+['quay.io/kata-containers/confidential-containers:signed',
+ 'quay.io/kata-containers/confidential-containers@sha256:febcf61c...']
+```
+
+The policy is injected per-pod via initdata `cdh.toml` using `file://` URIs
+(no KBS needed):
+
+```toml
+[image]
+enable_embedded_image_cache = true
+image_security_policy_uri = "file:///etc/image-policy.json"
+sigstore_config_uri = "file:///etc/sigstore-config.yaml"
+```
+
+**Positive — correct key, pod `Running`:**
+
+```
+image_rs::builder: getting image security policy from file:///etc/image-policy.json ...
+image_rs::builder: Existing metadata found. Using previous ones.
+image_rs::image: Image quay.io/kata-containers/confidential-containers:signed found in local cache, creating bundle
+image_rs::image: Use Anonymous image registry auth   # signature path taken
+```
+
+`kubectl get pod signed-positive` → `1/1 Running`, container exec OK. The image
+was served from the embedded cache **and** the signature verified.
+
+**Negative — wrong key, pod `StartError`:**
+
+Same signed image, but initdata policy uses a bogus `keyData`. The cached path
+runs `check_image_signature`, which rejects:
+
+```
+image_rs::image: Image quay.io/kata-containers/confidential-containers:signed found in local cache, creating bundle
+image_rs::image: Use Anonymous image registry auth
+Image Pull error: Image policy rejected: Denied by policy: rejected by `signedBy` rule:
+    The signatures do not satisfied! Reject reason: [not enough bytes in buffer: armor header
+     1: image_rs::signature::policy::simple::verify::verify_sig_and_extract_payload
+     2: image_rs::signature::policy::simple::judge_single_signature
+     3: image_rs::signature::SignatureValidator::check_image_requirement
+     4: image_rs::signature::SignatureValidator::check_image_signature
+```
+
+`kubectl get pod signed-negative` → `0/1 StartError`. The stack trace proves
+`check_image_signature` runs on the cached path inside the Kata VM — the old
+code would have served the image without any signature check.
+
+Repro scripts: `build-signed-image.sh` (build), `gen-signed-pods.sh` (initdata +
+pods); console logs `console-positive.log`, `console-negative2.log`.
+
 ---
 
 ## 5. Kata/QEMU findings
@@ -330,6 +391,9 @@ $ stat /run/kata-containers/image/layers/0 | grep Birth
 - `verify-signature-cache.sh` — signature-verification proof on the cached path (signed accepted / wrong-key rejected).
 - `signature-test-output.log` — full log of the signature-verification run.
 - `build-embedded-image.sh` — builds the embedded VM image + dm-verity recompute.
+- `build-signed-image.sh` — builds the VM image with the signed image + sigstore/pubkey/policy embedded.
+- `gen-signed-pods.sh` — generates positive/negative signature-test initdata + pods.
+- `console-positive.log`, `console-negative2.log` — Kata VM console logs (signed accepted / wrong-key rejected).
 - `gen-initdata-pod.sh` — generates `initdata.toml` + the test pod YAML.
 - `read-console.py` — reads a kata VM serial console socket.
 
