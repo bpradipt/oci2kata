@@ -30,16 +30,16 @@ This project does that.  We call it **embedding a container image**.
 ## The idea in one sentence
 
 Before the VM boots, we pre-pull the container image and bake its layers into
-the VM's root filesystem.  At boot, a small service copies the image's metadata
-into the CDH working directory and makes the layers visible.  When a pod asks
-CDH for that image, CDH finds it locally and creates the container instantly, with
-no network needed.
+the VM image (its root filesystem, or a separate extension image).  At boot, a
+small service copies the image's metadata into the CDH working directory and
+makes the layers visible.  When a pod asks CDH for that image, CDH finds it
+locally and creates the container instantly, with no network needed.
 
 ---
 
-## The two projects we had to change
+## The projects we had to change
 
-Making this work cleanly needed small changes in two open-source projects.
+Making this work cleanly needed small changes in three open-source projects.
 
 ### 1. guest-components (the CDH / image library)
 
@@ -58,16 +58,25 @@ We added a fast path:
 - After a normal (online) pull, we also record the reference so the *next*
   time is fast.
 
-This is a small, backwards-compatible change.  The two commits are:
+This fast path is **opt-in**, behind an `enable_embedded_image_cache` flag, so
+it is disabled by default and existing deployments are unaffected.
+
+Two details matter:
+
+- We record both the tag form and the `@sha256:...` digest form in the map,
+  because container runtimes like containerd resolve an image tag to a digest
+  before passing it on.  This way the cache is hit whether CDH is asked for the
+  tag or the digest.
+- The cached path **re-runs signature verification**.  A cached image used to
+  be served with no check at all; now, when a security policy is configured,
+  the cached image is verified against the same policy as a normal pull, so an
+  embedded image whose signature does not match the trusted key is rejected.
+
+The change is a single commit on the `image-rs-embedded-cache-main` branch:
 
 ```
-image-rs: add reference-based image cache lookup to skip registry pull
-image-rs: write manifest-digest form into reference_db after pull
+feat(image-rs): add opt-in embedded image cache with signature verification
 ```
-
-The second one matters because container runtimes like containerd resolve an
-image tag to a digest before passing it on.  We record both forms so the cache
-is hit whether CDH is asked for the tag or the digest.
 
 ### 2. cloud-api-adaptor (CAA, the peer pod manager)
 
@@ -92,6 +101,24 @@ tried to add a new layer for an image not in the cache (with a confusing "failed
 to roll back when unpacking" error).  Keeping the store writable while exposing
 the embedded layers through read-only bind mounts gives us both: cached images
 are instant, and new images can still be pulled normally.
+
+### 3. kata-containers (composable cache extensions for Kata/QEMU)
+
+The CAA build bakes the cache into a single VM image.  For **Kata/QEMU** we took
+a different route, using Kata's newer **composable VM image** feature: the cache
+ships as a separate, swappable guest extension image instead of being baked into
+the root filesystem.
+
+Kata 4.0 already mounts purpose-built extension images (like the confidential
+"coco" extension) read-only into the guest before the agent starts.  We added a
+small, generic base-image unit — `kata-image-cache-setup@.service` — that takes
+an extension carrying pre-pulled layers and a `meta_store.json`, bind-mounts
+each layer into CDH's writable layer store, and installs the metadata.  The
+extension itself is built exactly like the CAA cache: pre-pull with
+`cdh-oneshot`, pack as EROFS, protect with dm-verity.
+
+This means changing the cached image no longer means rebuilding the whole VM:
+you rebuild only the cache extension and update one config entry.
 
 ---
 
@@ -250,6 +277,48 @@ Full methodology, the node-side analysis, and the CDH journal proof are in
 
 ---
 
+## Kata/QEMU: composable cache extensions
+
+For Kata/QEMU the cache is delivered as a **composable guest extension image**
+rather than a rebuilt rootfs.  The base image and the coco extension stay
+untouched; only the cache extension changes with the images you embed.
+
+At runtime, the config cold-plugs the extension as a read-only block device:
+
+```toml
+[[hypervisor.qemu.guest_extension_images]]
+name = "imgcache"
+path = "/opt/kata/share/kata-containers/kata-containers-imgcache.img"
+verity_params = "root_hash=...,salt=...,data_blocks=...,..."
+```
+
+The extension is self-contained: the layers, `meta_store.json`, and — for signed
+images — the GPG pubkey, the local sigstore, and the image security policy, all
+with paths that resolve inside the extension mount.  The
+`kata-image-cache-setup@.service` unit bind-mounts the layers into CDH's store,
+and the agent launches the patched CDH from the coco extension.
+
+We validated two things end-to-end:
+
+- **Cache served with zero registry contact**: with the VM's egress to port 443
+  blocked, a busybox pod still reached `Running`; inside the VM the container
+  rootfs overlay was built on `lowerdir=.../image/layers/0` (the embedded layer)
+  with `reference_db` intact.
+- **Signature verification on the cached path**: a signed image embedded in the
+  extension verified and ran with the correct key, and was rejected
+  (`check_image_signature` → "rejected by `signedBy` rule") with a wrong key.
+
+The proof is in
+[composable-embedded-cache-test.md](composable-embedded-cache-test.md) and
+[composable-embedded-cache-signature-test.md](composable-embedded-cache-signature-test.md),
+with the design in [composable-embedded-cache.md](composable-embedded-cache.md).
+
+Because the cache is a separate extension, each cache extension can carry
+different images, sizes, and signing policies — decoupled from the base image
+and the coco extension.
+
+---
+
 ## Benefits
 
 - **Fast pod startup**: image creation drops from "download over the network"
@@ -258,7 +327,8 @@ Full methodology, the node-side analysis, and the CDH journal proof are in
   embedded images.
 - **Resilient**: no rate-limit surprises, no registry outages during pod start.
 - **Fits confidential computing**: everything stays inside the trusted VM
-  boundary; the image is baked into the verified root filesystem.
+  boundary; the image is baked into a dm-verity-protected image (the root
+  filesystem, or a verified extension in the composable approach).
 
 It is not for every scenario: for very large images the embedded cache grows the
 VM image, so for fast local registries the trade-off may not pay off.  Measure
@@ -273,20 +343,24 @@ The changes live on two local branches, ready to be opened as pull requests:
 
 | Project | Branch | What |
 |---|---|---|
-| guest-components | `image-cache-reference-db-v0.21.0` | `reference_db` fast path in image-rs |
+| guest-components | `image-rs-embedded-cache-main` | opt-in `reference_db` fast path + signature verification in image-rs |
 | cloud-api-adaptor | `feature/embedded-image-cache-v0.22.0` | `image-embedded` build + cache boot service |
+| kata-containers | `embedded-image-cache-composable` | `kata-image-cache-setup` base-image unit + generator wiring |
 
-Both are based on the **latest releases** of their projects (guest-components
-v0.21.0, cloud-api-adaptor v0.22.0), so they are ready to be proposed upstream.
+The guest-components and kata-containers branches are based on the latest
+`main` of their projects; the cloud-api-adaptor branch is based on v0.22.0.
 
 The full technical details, build scripts, and test documentation are in the
 project repository:
 
 - [embedding-container-image-in-caa.md](embedding-container-image-in-caa.md): the CAA/qcow2 approach
-- [embedding-container-image-in-kata-vm.md](embedding-container-image-in-kata-vm.md): the Kata/QEMU approach
+- [embedding-container-image-in-kata-vm.md](embedding-container-image-in-kata-vm.md): the Kata/QEMU monolithic-rootfs approach
 - [experiments-caa.md](experiments-caa.md): CAA validation experiments
 - [experiments-byom.md](experiments-byom.md): the BYOM test described here
 - [build-kata-vm-verity.sh](build-kata-vm-verity.sh): automated VM image build
+- [composable-embedded-cache.md](composable-embedded-cache.md): the composable extension design
+- [composable-embedded-cache-test.md](composable-embedded-cache-test.md): composable cache test record
+- [composable-embedded-cache-signature-test.md](composable-embedded-cache-signature-test.md): signature verification on the composable cache
 
 ---
 
