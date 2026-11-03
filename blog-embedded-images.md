@@ -319,6 +319,61 @@ and the coco extension.
 
 ---
 
+## How to bake the images
+
+One step is common to every delivery mechanism: pre-pulling the image with
+**`cdh-oneshot`**, the one-shot CDH CLI built from the patched guest-components.
+It writes the layers and a `meta_store.json` (with the `reference_db` map) that
+CDH reads at runtime:
+
+```bash
+# the patched CDH CLI (see "The projects we had to change" > guest-components)
+ONESHOT=/path/to/cdh-oneshot
+IMAGE=docker.io/library/nginx:latest
+
+# work_dir must match CDH's runtime image work dir so the layer paths line up
+mkdir -p /run/kata-containers/image
+
+cat > /tmp/cdh-build.toml <<'EOF'
+[kbc]
+name = "offline_fs_kbc"
+url = ""
+
+[image]
+work_dir = "/run/kata-containers/image"
+enable_embedded_image_cache = true
+EOF
+
+$ONESHOT --config /tmp/cdh-build.toml pull-image \
+    --image-url "$IMAGE" \
+    --bundle-path /tmp/pull-bundle
+```
+
+That produces:
+
+- `/run/kata-containers/image/layers/0..N` — the extracted layer directories.
+- `/run/kata-containers/image/meta_store.json` — with `reference_db` mapping
+  both `docker.io/library/nginx:latest` and
+  `docker.io/library/nginx@sha256:...` to the config digest.
+
+What happens next depends on the delivery mechanism:
+
+- **CAA** (`make image-embedded EMBEDDED_IMAGE=...`) runs this inside the build
+  and copies the layers + `meta_store.json` into the podvm
+  ([embedding-container-image-in-caa.md](embedding-container-image-in-caa.md)).
+- **Kata/QEMU composable** (`build-image-cache-extension.sh`) packs the layers
+  + `meta_store.json` into an EROFS + dm-verity extension image.
+- **Signed images** (`build-signed-cache-extension.sh`) additionally pre-pulls
+  with the image security policy and embeds the sigstore, pubkey, and policy in
+  the extension.
+
+The build scripts in this repo wrap these steps, but the
+`cdh-oneshot pull-image` invocation above is the exact operation they perform —
+the layer store format it writes is guaranteed to match what CDH expects at
+runtime.
+
+---
+
 ## Benefits
 
 - **Fast pod startup**: image creation drops from "download over the network"
