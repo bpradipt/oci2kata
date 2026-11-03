@@ -26,7 +26,7 @@ over from the earlier 3.31.0 work.
 
 ## 1. The code change
 
-Branch `image-rs-embedded-cache-main`, commit `31732111`
+Branch `image-rs-embedded-cache-main`, commit `109d08d1`
 `feat(image-rs): add opt-in embedded image cache with signature verification`.
 
 Files changed (relative to `confidential-containers/guest-components` `main`):
