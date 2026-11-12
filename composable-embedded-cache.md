@@ -17,6 +17,28 @@ instead of baking the container images into a single monolithic VM rootfs.
 > ([embedding-container-image-in-caa.md](embedding-container-image-in-caa.md)).
 > The image-rs embedded-cache *feature* itself stays generic to both.
 
+> **Implementation status:** implemented on the kata-containers branch
+> `embedded-image-cache-composable` (commits `97a1a1109`, `24ad8d982`,
+> `68467577`). It differs from the proposal below in these points:
+>
+> - The unit is a template, `kata-image-cache-setup@<name>.service`, enabled
+>   by the extension generator for **every** extension. It no-ops when the
+>   extension has no `meta_store.json`, so no extension name is hard-coded.
+> - The setup script **refuses an unverified cache extension** (no
+>   `/dev/mapper/extension-<name>`). image-rs checks signatures against the
+>   manifest digest in `meta_store.json` and does not re-hash layers, so the
+>   cache integrity has to come from dm-verity.
+> - **One cache extension per VM**, claimed atomically. Multiple cache
+>   extensions with namespaced layer numbering (below) were not implemented.
+> - The script accepts only numeric layer directories, and installs
+>   `meta_store.json` **last**, so a failure leaves CDH with no cache.
+> - The cache extension builder is in-tree:
+>   `tools/osbuilder/image-builder/build_image_cache_extension.sh`. It
+>   pre-pulls in a private mount namespace and packs with kata's
+>   `image_builder.sh`.
+> - The guest-components side (commit `7d169226`) never records images with
+>   encrypted layers and keys `reference_db` on normalized references.
+
 ---
 
 ## Verdict
@@ -265,6 +287,13 @@ store. Layer numbering must be namespaced (e.g. per-extension subdir or an
 offset) so two extensions do not collide on `layers/N`. This is a small
 extension of the single-extension script, not a new mechanism.
 
+**Implemented instead:** one cache extension per VM. The first cache
+extension claims `/run/kata-image-cache.owner` (atomic `mkdir`); any other
+cache extension fails its setup unit and is ignored. Two `meta_store.json`
+files cannot be merged by copying, so supporting several cache extensions
+needs a merge step as well as layer renumbering. Put several images in one
+extension instead.
+
 ---
 
 ## What needs to change (concrete)
@@ -330,8 +359,10 @@ that gets the flexibility the CAA path lacks, on top of the same image-rs change
    early-boot owner to do the equivalent, exactly as it does for extension
    mounting. The full-distro base is the primary target.
 3. **Whether the kata-agent still deletes `meta_store.json`** in the composable
-   guest — the self-bind-mount fix is assumed to carry over; needs re-verifying
-   on 4.0.0.
+   guest — **resolved: yes.** `create_sandbox` runs
+   `remove_dir_all("/run/kata-containers")`, and CDH loads the meta store
+   lazily on its first pull, after that. The self-bind-mount makes the file a
+   mount point; the unlink fails with `EBUSY` and `remove_dir_all` stops.
 4. **kata-agent namespace for the cache-setup unit** — the bind-mounts must run
    with sufficient privilege; the systemd unit runs as root in the base rootfs,
    matching the existing `kata-extension-mount@` unit, so this is expected to

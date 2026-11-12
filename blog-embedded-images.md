@@ -51,10 +51,11 @@ We added a fast path:
 
 - The store now keeps a map called **`reference_db`**, which records "image
   reference → image ID".
-- On every `PullImage` call, `image-rs` first checks this map.
-- If the image reference is already in the map **and** its layers are present
-  locally, it skips the registry entirely and builds the container bundle from
-  what is on disk.
+- On every `PullImage` call, `image-rs` first checks this map, using the
+  normalized reference (so `nginx` and `docker.io/library/nginx:latest` are the
+  same entry).
+- If the image reference is already in the map, it skips the registry entirely
+  and builds the container bundle from the layers on disk.
 - After a normal (online) pull, we also record the reference so the *next*
   time is fast.
 
@@ -71,6 +72,12 @@ Two details matter:
   be served with no check at all; now, when a security policy is configured,
   the cached image is verified against the same policy as a normal pull, so an
   embedded image whose signature does not match the trusted key is rejected.
+  The check covers the manifest digest recorded in `meta_store.json`; the
+  layers on disk are not re-hashed.  So the cache must sit on an
+  integrity-protected, measured medium (a dm-verity rootfs or extension), and
+  that is what both delivery mechanisms below use.
+- Images with **encrypted layers are never recorded** in the map.  Serving
+  them from the cache would skip the attestation-gated key release.
 
 The change is a single commit on the `image-rs-embedded-cache-main` branch:
 
@@ -84,15 +91,25 @@ CAA builds the peer pod VM images with a tool called mkosi.  We added:
 
 - A new build target `make image-embedded` that builds a podvm with a container
   image pre-embedded.
-- The build pre-pulls the image using a small CLI called `cdh-oneshot`, then
-  copies the layers and metadata into the image.
+- The build compiles CDH and `cdh-oneshot` from a pinned guest-components
+  commit (`GC_REF`), pre-pulls the image with `cdh-oneshot` (cache flag on),
+  fails if the image did not land in `reference_db`, then copies the layers and
+  metadata into the image.  It uses the `production` mkosi profile by default
+  (`EMBEDDED_PROFILE=debug` for the debug variant).
 - A boot-time service, **`kata-image-cache`**, that:
-  1. copies the image metadata (`meta_store.json`) into CDH's working directory
-     first (so CDH always sees it),
-  2. bind-mounts each cached layer directory into the CDH layer store,
-     read-only.
+  1. bind-mounts each cached layer directory into the CDH layer store,
+     read-only,
+  2. installs the image metadata (`meta_store.json`) into CDH's working
+     directory **last**, and bind-mounts it onto itself.  Last, so that if a
+     layer mount fails CDH sees no cache and pulls from the registry instead of
+     building a container from empty directories.  Self-bind-mounted, because
+     the kata-agent removes `/run/kata-containers` on `CreateSandbox`, before
+     CDH reads the file.
 - A new mkosi profile (`embedded`) that enables the service only for embedded
-  images.
+  images.  Only the embedded build raises the dm-verity hash partition to
+  256M; regular podvm images keep 64M.
+- The pod turns the cache on with `enable_embedded_image_cache = true` in its
+  initdata `cdh.toml`, so the setting is covered by attestation.
 
 The design choice that made it work: we **bind-mount** each layer directory
 onto a writable layer store, instead of mounting the whole cache read-only.
@@ -113,9 +130,15 @@ Kata 4.0 already mounts purpose-built extension images (like the confidential
 "coco" extension) read-only into the guest before the agent starts.  We added a
 small, generic base-image unit — `kata-image-cache-setup@.service` — that takes
 an extension carrying pre-pulled layers and a `meta_store.json`, bind-mounts
-each layer into CDH's writable layer store, and installs the metadata.  The
-extension itself is built exactly like the CAA cache: pre-pull with
-`cdh-oneshot`, pack as EROFS, protect with dm-verity.
+each layer into CDH's writable layer store, and installs the metadata last.
+The unit refuses a cache extension that is not dm-verity verified, and accepts
+only one cache extension per VM (CDH has a single meta store and layer store).
+
+The extension itself is built exactly like the CAA cache: pre-pull with
+`cdh-oneshot`, pack as EROFS, protect with dm-verity.  The kata branch adds an
+in-tree builder for this,
+`tools/osbuilder/image-builder/build_image_cache_extension.sh`, which reuses
+kata's own `image_builder.sh`.
 
 This means changing the cached image no longer means rebuilding the whole VM:
 you rebuild only the cache extension and update one config entry.
@@ -361,8 +384,11 @@ What happens next depends on the delivery mechanism:
 - **CAA** (`make image-embedded EMBEDDED_IMAGE=...`) runs this inside the build
   and copies the layers + `meta_store.json` into the podvm
   ([embedding-container-image-in-caa.md](embedding-container-image-in-caa.md)).
-- **Kata/QEMU composable** (`build-image-cache-extension.sh`) packs the layers
-  + `meta_store.json` into an EROFS + dm-verity extension image.
+- **Kata/QEMU composable** packs the layers + `meta_store.json` into an EROFS
+  + dm-verity extension image.  Use the in-tree
+  `tools/osbuilder/image-builder/build_image_cache_extension.sh` from the kata
+  branch (it runs the pre-pull above in a private mount namespace), or
+  `build-image-cache-extension.sh` in this repo.
 - **Signed images** (`build-signed-cache-extension.sh`) additionally pre-pulls
   with the image security policy and embeds the sigstore, pubkey, and policy in
   the extension.
@@ -390,17 +416,31 @@ VM image, so for fast local registries the trade-off may not pay off.  Measure
 first.  But for air-gapped, restricted, or slow-network deployments it is a
 clean win.
 
+Know the limits before you embed:
+
+- **Integrity, not confidentiality.**  dm-verity stops tampering, but the
+  layers are stored decrypted in the VM image or extension, readable by anyone
+  with the file.  Do not embed images that carry secrets.
+- **Tags are pinned.**  An embedded tag is served from the cache for the life
+  of the VM, even with `imagePullPolicy: Always`.  Rebuild the image or
+  extension to pick up a new tag.
+- **One cache extension per VM** on Kata/QEMU; put several images in one
+  extension instead.
+
 ---
 
 ## Where to find the changes
 
-The changes live on two local branches, ready to be opened as pull requests:
+The changes live on branches of the `bpradipt` forks, ready to be opened as
+pull requests:
 
-| Project | Branch | What |
-|---|---|---|
-| guest-components | `image-rs-embedded-cache-main` | opt-in `reference_db` fast path + signature verification in image-rs |
-| cloud-api-adaptor | `feature/embedded-image-cache-v0.22.0` | `image-embedded` build + cache boot service |
-| kata-containers | `embedded-image-cache-composable` | `kata-image-cache-setup` base-image unit + generator wiring |
+| Project | Branch | Commits | What |
+|---|---|---|---|
+| guest-components | `image-rs-embedded-cache-main` | `7d169226` | opt-in `reference_db` fast path + signature verification in image-rs |
+| cloud-api-adaptor | `feature/embedded-image-cache-v0.22.0` | `5aea6597`, `fa4553bd` | `image-embedded` build + cache boot service, build guide |
+| kata-containers | `embedded-image-cache-composable` | `97a1a1109`, `24ad8d982`, `68467577` | `kata-image-cache-setup` unit, generator wiring, cache extension builder + design doc |
+
+The CAA build pins guest-components commit `7d169226` (`GC_REF`).
 
 The guest-components and kata-containers branches are based on the latest
 `main` of their projects; the cloud-api-adaptor branch is based on v0.22.0.

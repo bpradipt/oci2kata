@@ -5,6 +5,20 @@ embedded image cache as a **Kata composable guest extension image** (the design
 in [composable-embedded-cache.md](composable-embedded-cache.md)) instead of a
 single monolithic rootfs.
 
+> **Superseded commits:** this run tested kata commits `68fe0cc28` and
+> `2ae224d8c` with the out-of-tree `build-image-cache-extension.sh`. The branch
+> `embedded-image-cache-composable` now has `97a1a1109`, `24ad8d982` and
+> `68467577`:
+>
+> - The setup script refuses an image cache extension that is not dm-verity
+>   verified (this run used a verified extension, so it is unaffected).
+> - Only one image cache extension per VM is accepted.
+> - Only numeric layer directories are accepted.
+> - The cache extension builder is in-tree:
+>   `tools/osbuilder/image-builder/build_image_cache_extension.sh`.
+>
+> This run was not repeated against the new commits.
+
 ---
 
 ## Summary

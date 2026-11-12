@@ -5,6 +5,20 @@ that add an **opt-in embedded image cache** plus **signature verification on the
 cached path**. It is preparation for a PR against
 `confidential-containers/guest-components`.
 
+> **Superseded commit:** this run tested commit `109d08d1`. After review the
+> change was reworked into commit `7d169226` on the same branch:
+>
+> - `reference_db` is keyed and looked up on the normalized reference.
+> - Images with encrypted layers are never recorded in `reference_db`.
+> - The unrelated "reuse an existing `config.json`" shortcut in `pull_task`
+>   was removed.
+> - `meta_store.json` is rewritten only when a new entry is added.
+> - New unit tests cover the cache miss, the normalized lookup, and a cache
+>   hit rejected by the signature policy.
+>
+> `7d169226` passed `cargo fmt`, `cargo clippy -D warnings` and the new unit
+> tests. The Kata/QEMU runs in this record were not repeated against it.
+
 ---
 
 ## Summary

@@ -21,6 +21,21 @@ The run proves four things:
 4. **Signature verification works fully offline** against the cached image:
    correct key → `Running`; wrong key → rejected by the `signedBy` policy.
 
+> **Superseded build:** this run used CDH from commit `109d08d1` and a
+> hand-built pod VM Dockerfile (§3.3). The cloud-api-adaptor branch
+> `feature/embedded-image-cache-v0.22.0` (commits `5aea6597`, `fa4553bd`) now
+> builds this in-tree with `make image-embedded`, which:
+>
+> - builds CDH from the pinned guest-components commit `7d169226` (`GC_REF`);
+> - pre-pulls with `enable_embedded_image_cache = true` and fails the build
+>   if `reference_db` is empty;
+> - bind-mounts the layers first and installs `meta_store.json` **last**,
+>   bind-mounted onto itself (the §3.4 setup copied it first, without the
+>   self-bind-mount);
+> - uses the `production` mkosi profile by default.
+>
+> This run was not repeated against the in-tree build.
+
 ---
 
 ## Environment

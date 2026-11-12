@@ -8,6 +8,16 @@ serves it from local cache with zero registry contact inside the VM.
 > CDH fork and `meta_store.json` format; the differences are in the VM image
 > build tooling, filesystem layout, and layer store mount strategy.
 
+> **Older branch:** this document describes the earlier `image-cache-0.21.1`
+> branch (`podvm-mkosi`, erofs layer archive, CDH from `image-cache-0.20.0`).
+> The current implementation is the cloud-api-adaptor branch
+> `feature/embedded-image-cache-v0.22.0`, documented in
+> `src/cloud-api-adaptor/podvm/EMBEDDED_IMAGE.md` on that branch. It builds CDH
+> from the pinned guest-components commit `7d169226`, keeps the layers as plain
+> directories in the squashfs rootfs (no erofs), installs `meta_store.json`
+> last with a self-bind-mount, and needs `enable_embedded_image_cache = true`
+> in the pod's initdata `cdh.toml`.
+
 ---
 
 ## How It Differs from the Kata/QEMU Approach
